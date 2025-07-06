@@ -1,0 +1,12 @@
+fileFormatVersion: 2
+guid: 92c7ee1e0fd37f945935d64bd311f852
+MonoImporter:
+  externalObjects: {}
+  serializedVersion: 2
+  defaultReferences:
+  - SSGIMaterial: {fileID: 2100000, guid: ea69c1a9739c5244b9052ebf0b19750a, type: 2}
+  executionOrder: 0
+  icon: {instanceID: 0}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
