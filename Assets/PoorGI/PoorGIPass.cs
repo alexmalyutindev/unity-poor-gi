@@ -20,6 +20,8 @@ namespace AlexMalyutin.PoorGI
         {
             public TextureHandle CameraDepth;
 
+            public int TraceWidth;
+            public int TraceHeight;
             public TextureHandle TraceDepth;
             public TextureHandle TraceDepthTemp;
 
@@ -53,10 +55,15 @@ namespace AlexMalyutin.PoorGI
             var traceScale = 4.0f;
             // BUG: If frame buffer is not divisible by 4, border appears on right or top side of MaxDepth.
             // TODO: Make bigger buffer for MaxDepth, but trace only valid pixels.
-            var traceWidth = Mathf.CeilToInt(screenWidth / traceScale);
-            var traceHeight = Mathf.CeilToInt(screenHeight / traceScale);
+            var traceWidth = Mathf.FloorToInt(screenWidth / traceScale);
+            var traceHeight = Mathf.FloorToInt(screenHeight / traceScale);
+            var traceBufferWidth = Mathf.CeilToInt(screenWidth / traceScale);
+            var traceBufferHeight = Mathf.CeilToInt(screenHeight / traceScale);
 
-            var traceDepthDesc = new TextureDesc(traceWidth, traceHeight)
+            passData.TraceWidth = traceWidth;
+            passData.TraceHeight = traceHeight;
+
+            var traceDepthDesc = new TextureDesc(traceBufferWidth, traceBufferHeight)
             {
                 name = "_MaxDepth",
                 format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.RFloat,
@@ -101,6 +108,7 @@ namespace AlexMalyutin.PoorGI
                 // cmd.Blit(data.TraceDepthTemp, data.TraceDepth, data.SSGIMaterial, BlurVerticalPass);
 
                 // Upscaling
+                cmd.SetGlobalVector("_TraceSize", new Vector4(data.TraceWidth, data.TraceHeight));
                 cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
                 cmd.Blit(data.GIBuffer, data.CameraColorTarget, data.SSGIMaterial, BilateralUpsamplePass);
             });
