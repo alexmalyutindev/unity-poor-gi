@@ -164,7 +164,7 @@ Shader "Hidden/PoorGI"
                 
                 half3 viewDirectionVS = -normalize(probeVS);
 
-                const int raySteps = 3;
+                const int raySteps = 10;
                 const half rayLength = 0.5f;
                 const half rayCount = 32.0h;
                 const half deltaAngle = TWO_PI / rayCount;
@@ -177,15 +177,19 @@ Shader "Hidden/PoorGI"
                     sincos(alpha, rayDirection.x, rayDirection.y);
                     rayDirection /= normalize(_ScreenSize.xy);
 
+                    half prevNdotR = -1.0h;
                     UNITY_LOOP
-                    for (half step = 0.75h; step < raySteps; step++)
+                    for (half stepIndex = 0.75h; stepIndex < raySteps; stepIndex++)
                     {
-                        half ji = (jitter + step) / raySteps;
+                        half ji = (jitter + stepIndex) / raySteps;
                         half noff = ji * ji;
 
                         half2 rayUV = traceUV + rayDirection * noff * rayLength;
 
-                        if (any(rayUV < 0.0h || rayUV > 1.0h)) break;
+                        if (any(rayUV < 0.0h || rayUV > 1.0h))
+                        {
+                            break;
+                        }
 
                         half linearDepth = SampleTraceLinearDepth(rayUV);
                         half3 lingting = SampleTraceLighting(rayUV);
@@ -201,7 +205,14 @@ Shader "Hidden/PoorGI"
                         half surfNdotR = dot(surfNormalVS, -rayDirectionVS);
                         half surfNdotN = 1.0h - abs(dot(surfNormalVS, probeNormalVS));
 
-                        gi += lingting * saturate(NdotR) / raySteps * exp(-length(rayDirVS) * 0.2);
+                        half traceDistance = length(rayDirVS);
+                        
+                        half lambetian = saturate(NdotR);
+                        half occlusion = step(prevNdotR, NdotR);
+                        prevNdotR = max(prevNdotR, NdotR);
+
+                        // TODO: Compute SH.
+                        gi += lingting * lambetian * occlusion / raySteps;
                     }
                 }
 
