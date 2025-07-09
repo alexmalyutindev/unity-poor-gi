@@ -76,8 +76,7 @@ namespace AlexMalyutin.PoorGI
             var giBufferDesc = new TextureDesc(traceWidth, traceHeight)
             {
                 name = "_GIBuffer",
-                format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.RGB111110Float,
-                    RenderTextureReadWrite.sRGB),
+                format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.ARGBFloat, isSRGB: true),
                 clearBuffer = false,
             };
             passData.GIBuffer = renderGraph.CreateTexture(giBufferDesc);
@@ -94,6 +93,8 @@ namespace AlexMalyutin.PoorGI
                 const int BilateralUpsamplePass = 4;
 
                 var cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
+                
+                // Downsample Depth
                 cmd.Blit(data.CameraDepth, data.TraceDepth, data.SSGIMaterial, DownSampleDepthPass);
 
                 // Tracing
