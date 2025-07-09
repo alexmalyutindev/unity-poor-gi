@@ -66,7 +66,8 @@ Shader "Hidden/PoorGI"
 
             half4 Fragmet(Varyings input) : SV_Target
             {
-                return LinearEyeDepth(SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_PointClamp, input.uv, 0), _ZBufferParams);
+                // return LinearEyeDepth(SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_PointClamp, input.uv, 0), _ZBufferParams);
+
                 half depth = UNITY_RAW_FAR_CLIP_VALUE;
                 int2 coord = floor(input.postionCS.xy) * 4;
 
@@ -111,6 +112,17 @@ Shader "Hidden/PoorGI"
                 return positionVS.xyz / positionVS.w;
             }
 
+            half3 TransformScreenUVToViewLinear(half2 uv, half linearDepth)
+            {
+                half4 positionVS = mul(
+                    UNITY_MATRIX_I_P,
+                    half4(mad(uv, half2(-2.0h, 2.0h), half2(1.0h, -1.0h)), UNITY_RAW_FAR_CLIP_VALUE, 1.0h)
+                );
+                positionVS.xyz /= positionVS.w;
+                positionVS.xyz *= linearDepth / positionVS.z;
+                return positionVS.xyz;
+            }
+
             half3 TransformWorldToCameraNormal(half3 normalWS)
             {
                 return normalize(mul(unity_WorldToCamera, half4(normalWS, 0.0h)).xyz);
@@ -124,7 +136,7 @@ Shader "Hidden/PoorGI"
                 return color * max(0.0h, luminance);
             }
 
-            half SampleTraceDepth(half2 uv)
+            half SampleTraceLinearDepth(half2 uv)
             {
                 return SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_PointClamp, uv, 0);
             }
@@ -142,16 +154,17 @@ Shader "Hidden/PoorGI"
             {
                 half3 gi = 0.0h;
 
-                half2 traceUV = input.uv - _MainTex_TexelSize.xy * 0.5h;
+                half2 traceUV = input.uv;
                 
-                half probeDepth = LoadTraceDepth(input.postionCS.xy);
+                half probeLinearDepth = LoadTraceDepth(input.postionCS.xy);
                 half3 probeNormalWS = SamplerTraceNormals(traceUV);
                 half3 probeNormalVS = TransformWorldToCameraNormal(probeNormalWS);
 
-                half3 probeVS = TransformScreenUVToView(traceUV, probeDepth);
+                half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth);
+                
                 half3 viewDirectionVS = -normalize(probeVS);
 
-                const int raySteps = 4;
+                const int raySteps = 3;
                 const half rayLength = 0.5f;
                 const half rayCount = 32.0h;
                 const half deltaAngle = TWO_PI / rayCount;
@@ -161,11 +174,11 @@ Shader "Hidden/PoorGI"
                 {
                     half2 rayDirection;
                     half jitter = GRnoise2(floor(input.postionCS.xy));
-                    sincos(alpha, rayDirection.y, rayDirection.x);
+                    sincos(alpha, rayDirection.x, rayDirection.y);
                     rayDirection /= normalize(_ScreenSize.xy);
 
                     UNITY_LOOP
-                    for (half step = 0; step < raySteps; step++)
+                    for (half step = 0.75h; step < raySteps; step++)
                     {
                         half ji = (jitter + step) / raySteps;
                         half noff = ji * ji;
@@ -174,25 +187,25 @@ Shader "Hidden/PoorGI"
 
                         if (any(rayUV < 0.0h || rayUV > 1.0h)) break;
 
-                        half depth = SampleTraceDepth(rayUV);
+                        half linearDepth = SampleTraceLinearDepth(rayUV);
                         half3 lingting = SampleTraceLighting(rayUV);
                         half3 surfNormalWS = SamplerTraceNormals(rayUV);
                         half3 surfNormalVS = TransformWorldToCameraNormal(surfNormalWS);
 
-                        half3 rayVS = TransformScreenUVToView(rayUV, depth);
-                        half3 rayDirectionVS = normalize(rayVS - probeVS);
+                        half3 rayVS = TransformScreenUVToViewLinear(rayUV, linearDepth);
+                        half3 rayDirVS = rayVS - probeVS;
+                        half3 rayDirectionVS = normalize(rayDirVS);
 
                         half NdotR = dot(probeNormalVS, rayDirectionVS);
                         half VdotR = dot(viewDirectionVS, rayDirectionVS);
                         half surfNdotR = dot(surfNormalVS, -rayDirectionVS);
                         half surfNdotN = 1.0h - abs(dot(surfNormalVS, probeNormalVS));
 
-                        gi += lingting * saturate(NdotR) / raySteps;
+                        gi += lingting * saturate(NdotR) / raySteps * exp(-length(rayDirVS) * 0.2);
                     }
                 }
 
-                // return half4(0.1h * probeDepth.xxx, probeDepth);
-                return half4(gi / rayCount, probeDepth);
+                return half4(gi / rayCount, probeLinearDepth);
             }
             ENDHLSL
         }
@@ -209,6 +222,7 @@ Shader "Hidden/PoorGI"
 
             half4 Fragmet(Varyings input) : SV_Target
             {
+                // TODO: Bilateral blur
                 half4 color = 0.0h;
                 for (half i = -4.0h; i <= 4.1h; i++)
                 {
@@ -235,6 +249,7 @@ Shader "Hidden/PoorGI"
 
             half4 Fragmet(Varyings input) : SV_Target
             {
+                // TODO: Bilateral blur
                 half4 color = 0.0h;
                 for (half i = -4.0h; i <= 4.1h; i++)
                 {
@@ -355,7 +370,7 @@ Shader "Hidden/PoorGI"
                 half _UpsampleTolerance = 1.0h;
                 half _NoiseFilterStrength = 0.9h;
                 half4 initialWeight = half4(9, 3, 3, 1); // ???
-                half4 weights = initialWeight / (100.0h * abs(hiDepth.xxxx - lowDepthABCD) + 1.0h);
+                half4 weights = bilinearWeights / (100.0h * abs(hiDepth.xxxx - lowDepthABCD) + 1.0h);
                 half totalWeight = dot(weights, 1.0h);
                 weights /= totalWeight;
 
