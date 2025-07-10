@@ -1,5 +1,4 @@
 ﻿using UnityEngine;
-using UnityEngine.Assertions.Must;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.RenderGraphModule;
@@ -10,10 +9,16 @@ namespace AlexMalyutin.PoorGI
     public class PoorGIPass : ScriptableRenderPass
     {
         private readonly Material _ssgiMaterial;
+        private int _upscaleType;
 
         public PoorGIPass(Material ssgiMaterial)
         {
             _ssgiMaterial = ssgiMaterial;
+        }
+
+        public void Setup(int upscaleType)
+        {
+            _upscaleType = upscaleType;
         }
 
         private class PassData
@@ -23,7 +28,6 @@ namespace AlexMalyutin.PoorGI
             public int TraceWidth;
             public int TraceHeight;
             public TextureHandle TraceDepth;
-            public TextureHandle TraceDepthTemp;
 
             public TextureHandle GIBuffer;
             public TextureHandle GIBufferTemp;
@@ -31,6 +35,7 @@ namespace AlexMalyutin.PoorGI
             public TextureHandle CameraColorTarget;
 
             public Material SSGIMaterial;
+            public int UpsaleType;
         }
 
         public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
@@ -41,6 +46,7 @@ namespace AlexMalyutin.PoorGI
             using var builder = renderGraph.AddUnsafePass<PassData>(nameof(PoorGIPass), out var passData);
             builder.AllowPassCulling(false);
 
+            passData.UpsaleType = _upscaleType;
             passData.SSGIMaterial = _ssgiMaterial;
 
             passData.CameraDepth = resourceData.cameraDepthTexture;
@@ -65,13 +71,10 @@ namespace AlexMalyutin.PoorGI
 
             var traceDepthDesc = new TextureDesc(traceBufferWidth, traceBufferHeight)
             {
-                name = "_MaxDepth",
-                format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.RFloat,
-                    RenderTextureReadWrite.Linear),
+                name = "_TraceDepth",
+                format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.RFloat, false),
             };
             passData.TraceDepth = builder.CreateTransientTexture(traceDepthDesc);
-            traceDepthDesc.name = "_MaxDepth_Temp";
-            passData.TraceDepthTemp = builder.CreateTransientTexture(traceDepthDesc);
 
             var giBufferDesc = new TextureDesc(traceWidth, traceHeight)
             {
@@ -93,7 +96,7 @@ namespace AlexMalyutin.PoorGI
                 const int BilateralUpsamplePass = 4;
 
                 var cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
-                
+
                 // Downsample Depth
                 cmd.Blit(data.CameraDepth, data.TraceDepth, data.SSGIMaterial, DownSampleDepthPass);
 
@@ -101,14 +104,11 @@ namespace AlexMalyutin.PoorGI
                 cmd.Blit(data.TraceDepth, data.GIBuffer, data.SSGIMaterial, TracePass);
 
                 // Blur GI
-                // cmd.Blit(data.GIBuffer, data.GIBufferTemp, data.SSGIMaterial, BlurHorizontalPass);
-                // cmd.Blit(data.GIBufferTemp, data.GIBuffer, data.SSGIMaterial, BlurVerticalPass);
-
-                // Blur Depth
-                // cmd.Blit(data.TraceDepth, data.TraceDepthTemp, data.SSGIMaterial, BlurHorizontalPass);
-                // cmd.Blit(data.TraceDepthTemp, data.TraceDepth, data.SSGIMaterial, BlurVerticalPass);
+                cmd.Blit(data.GIBuffer, data.GIBufferTemp, data.SSGIMaterial, BlurHorizontalPass);
+                cmd.Blit(data.GIBufferTemp, data.GIBuffer, data.SSGIMaterial, BlurVerticalPass);
 
                 // Upscaling
+                cmd.SetGlobalInteger("_UpscaleType", data.UpsaleType);
                 cmd.SetGlobalVector("_TraceSize", new Vector4(data.TraceWidth, data.TraceHeight));
                 cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
                 cmd.Blit(data.GIBuffer, data.CameraColorTarget, data.SSGIMaterial, BilateralUpsamplePass);

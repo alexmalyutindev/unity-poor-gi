@@ -66,7 +66,7 @@ Shader "Hidden/PoorGI"
 
             half4 Fragmet(Varyings input) : SV_Target
             {
-                // return LinearEyeDepth(SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_PointClamp, input.uv, 0), _ZBufferParams);
+                // return LinearEyeDepth(SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv, 0), _ZBufferParams);
 
                 half depth = UNITY_RAW_FAR_CLIP_VALUE;
                 int2 coord = floor(input.postionCS.xy) * 4;
@@ -77,7 +77,12 @@ Shader "Hidden/PoorGI"
                     UNITY_LOOP
                     for (int x = 0; x < 4; x++)
                     {
-                        depth = max(depth, LOAD_TEXTURE2D_LOD(_MainTex, coord + int2(x, y), 0).x);
+                        half d = LOAD_TEXTURE2D_LOD(_MainTex, coord + int2(x, y), 0).x;
+                        #if UNITY_REVERSED_Z
+                        depth = max(depth, d);
+                        #else
+                        depth = min(depth, d);
+                        #endif
                     }
                 }
 
@@ -140,6 +145,7 @@ Shader "Hidden/PoorGI"
             {
                 return SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_PointClamp, uv, 0);
             }
+
             half LoadTraceDepth(uint2 coord)
             {
                 return LOAD_TEXTURE2D_LOD(_MainTex, coord, 0).r;
@@ -155,16 +161,16 @@ Shader "Hidden/PoorGI"
                 half3 gi = 0.0h;
 
                 half2 traceUV = input.uv;
-                
+
                 half probeLinearDepth = LoadTraceDepth(input.postionCS.xy);
                 half3 probeNormalWS = SamplerTraceNormals(traceUV);
                 half3 probeNormalVS = TransformWorldToCameraNormal(probeNormalWS);
 
                 half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth);
-                
+
                 half3 viewDirectionVS = -normalize(probeVS);
 
-                const int raySteps = 10;
+                const int raySteps = 4;
                 const half rayLength = 0.5f;
                 const half rayCount = 32.0h;
                 const half deltaAngle = TWO_PI / rayCount;
@@ -206,13 +212,13 @@ Shader "Hidden/PoorGI"
                         half surfNdotN = 1.0h - abs(dot(surfNormalVS, probeNormalVS));
 
                         half traceDistance = length(rayDirVS);
-                        
+
                         half lambetian = saturate(NdotR);
                         half occlusion = step(prevNdotR, NdotR);
                         prevNdotR = max(prevNdotR, NdotR);
 
                         // TODO: Compute SH.
-                        gi += lingting * lambetian * occlusion / raySteps;
+                        gi += lingting * lambetian * occlusion * exp2(-traceDistance * 0.2h) / raySteps;
                     }
                 }
 
@@ -233,17 +239,29 @@ Shader "Hidden/PoorGI"
 
             half4 Fragmet(Varyings input) : SV_Target
             {
+                const half2 blurDirection = half2(_MainTex_TexelSize.x, 0.0h);
+
+                // NOTE: Input is GI+Depth
+                half4 centerColorDepth = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv);
+                half centerLum = Luminance(centerColorDepth.rgb);
+
                 // TODO: Bilateral blur
-                half4 color = 0.0h;
-                for (half i = -4.0h; i <= 4.1h; i++)
+                half4 result = 0.0h;
+                half totalWeight = 0.0h;
+                for (half i = -5.0h; i <= 5.1h; i++)
                 {
-                    color += SAMPLE_TEXTURE2D(
-                        _MainTex,
-                        sampler_LinearClamp,
-                        input.uv + half2(_MainTex_TexelSize.x * i, 0.0h)
-                    );
+                    half2 offset = blurDirection * i;
+                    half4 colorDepth = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
+                    half lum = Luminance(colorDepth.rgb);
+
+                    // TODO: Add gaussian weight
+                    half weight = exp(-i * i) / exp(10.0h * abs(centerColorDepth.a - colorDepth.a) * abs(centerLum - lum));
+                    result += colorDepth * weight;
+                    totalWeight += weight;
                 }
-                return color / 9.0h;
+
+                // return result / totalWeight;
+                return half4(result.rgb / totalWeight, centerColorDepth.a);
             }
             ENDHLSL
         }
@@ -260,17 +278,28 @@ Shader "Hidden/PoorGI"
 
             half4 Fragmet(Varyings input) : SV_Target
             {
+                const half2 blurDirection = half2(0.0h, _MainTex_TexelSize.y);
+
+                // NOTE: Input is GI+Depth
+                half4 centerColorDepth = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv);
+                half centerLum = Luminance(centerColorDepth.rgb);
+
                 // TODO: Bilateral blur
-                half4 color = 0.0h;
-                for (half i = -4.0h; i <= 4.1h; i++)
+                half4 result = 0.0h;
+                half totalWeight = 0.0h;
+                for (half i = -5.0h; i <= 5.1h; i++)
                 {
-                    color += SAMPLE_TEXTURE2D(
-                        _MainTex,
-                        sampler_LinearClamp,
-                        input.uv + half2(0.0h, _MainTex_TexelSize.y * i)
-                    );
+                    half2 offset = blurDirection * i;
+                    half4 colorDepth = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
+                    half lum = Luminance(colorDepth.rgb);
+
+                    half weight = exp(-i * i) / exp(10.0h * abs(centerColorDepth.a - colorDepth.a) * abs(centerLum - lum));
+                    result += colorDepth * weight;
+                    totalWeight += weight;
                 }
-                return color / 9.0h;
+
+                // return result / totalWeight;
+                return half4(result.rgb / totalWeight, centerColorDepth.a);
             }
             ENDHLSL
         }
@@ -285,6 +314,7 @@ Shader "Hidden/PoorGI"
             #pragma vertex FulscreenVertex
             #pragma fragment Fragmet
 
+            int _UpscaleType;
             half4 _TraceSize;
             half4 _TraceDepth_TexelSize;
             TEXTURE2D(_TraceDepth);
@@ -294,12 +324,13 @@ Shader "Hidden/PoorGI"
                 return 1.0h / (_ZBufferParams.z * depth + _ZBufferParams.w);
             }
 
-            inline half4 LoadGI(uint2 coord)
+            inline half4 LoadGI(int2 coord)
             {
                 // return SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, coord * _MainTex_TexelSize.xy, 0);
                 return LOAD_TEXTURE2D_LOD(_MainTex, coord, 0);
             }
-            inline half LoadTraceDepth(uint2 coord)
+
+            inline half LoadTraceDepth(int2 coord)
             {
                 return LOAD_TEXTURE2D_LOD(_TraceDepth, coord, 0).x;
             }
@@ -316,6 +347,103 @@ Shader "Hidden/PoorGI"
                 return bilinearWeights;
             }
 
+            half4 GetGI_WiderDepth(int2 coord, half4 bilinearWeights, half hiLinearDepth)
+            {
+                // c d
+                // a b
+                half4 offset = half4(-_MainTex_TexelSize.xy, _MainTex_TexelSize.xy) * 0.66h;
+                half2 center = (coord + 0.5h) * _MainTex_TexelSize.xy;
+
+                half4 a = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, center + offset.xy, 0);
+                half4 b = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, center + offset.zy, 0);
+                half4 c = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, center + offset.xw, 0);
+                half4 d = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, center + offset.zw, 0);
+
+                half4 lowDepthABCD = half4(a.a, b.a, c.a, d.a);
+
+                half4 weights = bilinearWeights / exp(10.0h * abs(lowDepthABCD - hiLinearDepth));
+                weights /= dot(1.0h, weights) + 0.000001h;
+                return mul(weights, half4x4(a, b, c, d));
+                return mul(weights, half4x4(a.aaaa, b.aaaa, c.aaaa, d.aaaa)) * 0.1;
+            }
+
+            half4 Fragmet(Varyings input) : SV_Target
+            {
+                int2 traceCoord = floor(input.postionCS.xy) / 4;
+                // TODO: Bilinear weight???
+                half2 ratio = frac(floor(input.postionCS.xy) * 0.25h);
+                half4 bilinearWeights = GetBilinearWeights(ratio);
+
+                half hiDepth = LoadSceneDepth(floor(input.postionCS.xy));
+
+                half4 giDepthA = LoadGI(traceCoord);
+                half4 giDepthB = LoadGI(traceCoord + int2(1, 0));
+                half4 giDepthC = LoadGI(traceCoord + int2(0, 1));
+                half4 giDepthD = LoadGI(traceCoord + int2(1, 1));
+
+                hiDepth = LinearEyeDepth(hiDepth, _ZBufferParams);
+                half4 lowDepthABCD = half4(giDepthA.a, giDepthB.a, giDepthC.a, giDepthD.a);
+
+                if (_UpscaleType == 0)
+                {
+                    return GetGI_WiderDepth(traceCoord, bilinearWeights, hiDepth);
+                }
+                else if (_UpscaleType == 1)
+                {
+                    half4 weights = bilinearWeights * saturate(exp(-100.0h * abs(hiDepth - lowDepthABCD)));
+                    half totalWeight = dot(1.0h, weights);
+                    weights = saturate(weights / totalWeight);
+                    half4 result =
+                        giDepthA * weights.x +
+                        giDepthB * weights.y +
+                        giDepthC * weights.z +
+                        giDepthD * weights.w;
+
+                    return result;
+                }
+                else if (_UpscaleType == 2)
+                {
+                    half _UpsampleTolerance = 1.0h;
+                    half _NoiseFilterStrength = 0.9h;
+                    half4 initialWeight = half4(9, 3, 3, 1); // ???
+                    half4 weights = initialWeight * bilinearWeights / (100.0h * abs(hiDepth.xxxx - lowDepthABCD) + 1.0h);
+                    half totalWeight = dot(weights, 1.0h);
+                    weights /= totalWeight;
+
+                    // weights *= bilinearWeights;
+
+                    // #define DEBUG 
+                    #ifdef DEBUG
+                    half4 result =
+                        giDepthA.a * weights.x +
+                        giDepthB.a * weights.y +
+                        giDepthC.a * weights.z +
+                        giDepthD.a * weights.w;
+                    result = abs(result - hiDepth);
+                    #else
+
+                    half4 result =
+                        giDepthA * weights.x +
+                        giDepthB * weights.y +
+                        giDepthC * weights.z +
+                        giDepthD * weights.w;
+
+                    #endif
+
+                    return result;
+                }
+                else if (_UpscaleType == 3)
+                {
+                    // https://github.com/Polish-Miko/GravityEngine/blob/6fad1bd3140ccf5f656197374fe32c7defa3987c/GEngine/GDxRenderer/Shaders/GtaoUpsamplePS.hlsl#L22
+                    half4 w = saturate(1.0h - abs(hiDepth.xxxx - lowDepthABCD) / 2.5h);
+                    half3 colorAB = lerp(giDepthA * w.x, giDepthB * w.y, ratio.x);
+                    half3 colorCD = lerp(giDepthC * w.z, giDepthD * w.w, ratio.x);
+                    return half4(lerp(colorAB, colorCD, ratio.y), 1.0h);
+                }
+
+                return 0;
+            }
+
             half4 Fragmet2(Varyings input) : SV_Target
             {
                 uint2 traceCoord = floor(input.postionCS.xy) / 4;
@@ -329,7 +457,7 @@ Shader "Hidden/PoorGI"
 
                 half lowDepthC = giDepthC.a;
                 half centerWeight = 1.0h / (1.0h + abs(hiDepth - lowDepthC));
-                
+
                 half4 lowDepthTLRB = half4(giDepthT.a, giDepthL.a, giDepthR.a, giDepthB.a);
                 half4 weights = 1.0h / (1.0h + abs(hiDepth - lowDepthTLRB));
 
@@ -342,76 +470,7 @@ Shader "Hidden/PoorGI"
                     giDepthT * weights.x +
                     giDepthL * weights.y +
                     giDepthR * weights.z +
-                    giDepthB * weights.w
-                ;
-            }
-
-            half4 Fragmet(Varyings input) : SV_Target
-            {
-                int2 traceCoord = floor(input.postionCS.xy) / 4;
-
-                half hiDepth = LoadSceneDepth(floor(input.postionCS.xy));
-
-                half4 giDepthA = LoadGI(traceCoord);
-                half4 giDepthB = LoadGI(traceCoord + int2(1, 0));
-                half4 giDepthC = LoadGI(traceCoord + int2(0, 1));
-                half4 giDepthD = LoadGI(traceCoord + int2(1, 1));
-
-                hiDepth = LinearEyeDepth(hiDepth, _ZBufferParams);
-                half4 lowDepthABCD = half4(giDepthA.a, giDepthB.a, giDepthC.a, giDepthD.a);
-
-                // TODO: Bilinear weight???
-                half2 ratio = frac(floor(input.postionCS.xy) * 0.25h);
-                half4 bilinearWeights = GetBilinearWeights(ratio);
-
-                if (true)
-                {
-                    half4 w = bilinearWeights * saturate(exp(-1.0h * abs(hiDepth - lowDepthABCD)));
-                    half tw = dot(1.0h, w);
-                    w = saturate(w / tw);
-                    half4 res =
-                        giDepthA * w.x + 
-                        giDepthB * w.y + 
-                        giDepthC * w.z + 
-                        giDepthD * w.w;
-
-                    return res;
-                }
-
-                half _UpsampleTolerance = 1.0h;
-                half _NoiseFilterStrength = 0.9h;
-                half4 initialWeight = half4(9, 3, 3, 1); // ???
-                half4 weights = bilinearWeights / (100.0h * abs(hiDepth.xxxx - lowDepthABCD) + 1.0h);
-                half totalWeight = dot(weights, 1.0h);
-                weights /= totalWeight;
-
-                // weights *= bilinearWeights;
-
-                // https://github.com/Polish-Miko/GravityEngine/blob/6fad1bd3140ccf5f656197374fe32c7defa3987c/GEngine/GDxRenderer/Shaders/GtaoUpsamplePS.hlsl#L22
-                // half4 w = saturate(1.0h - abs(hiDepth.xxxx - lowDepthABCD) / 2.5h);
-                // half3 colorAB = lerp(depthA * w.x, depthB * w.y, localOffset.x);
-                // half3 colorCD = lerp(depthC * w.z, depthD * w.w, localOffset.x);
-                // return half4(lerp(colorAB, colorCD, localOffset.y) * 0.1h, 1.0h);
-
-                // #define DEBUG 
-                #ifdef DEBUG
-                half4 result =
-                    giDepthA.a * weights.x +
-                    giDepthB.a * weights.y +
-                    giDepthC.a * weights.z +
-                    giDepthD.a * weights.w;
-                result = abs(result - hiDepth);
-                #else
-
-                half4 result =
-                    giDepthA * weights.x +
-                    giDepthB * weights.y +
-                    giDepthC * weights.z +
-                    giDepthD * weights.w;
-
-                #endif
-
-                return result;
+                    giDepthB * weights.w;
             }
             ENDHLSL
         }

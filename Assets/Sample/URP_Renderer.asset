@@ -65,4 +65,5 @@ MonoBehaviour:
   m_Name: SSGI
   m_EditorClassIdentifier: 
   m_Active: 1
+  UpscaleType: 0
   SSGIMaterial: {fileID: 2100000, guid: ea69c1a9739c5244b9052ebf0b19750a, type: 2}

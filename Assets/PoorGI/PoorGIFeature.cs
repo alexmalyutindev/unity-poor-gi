@@ -5,6 +5,9 @@ namespace AlexMalyutin.PoorGI
 {
     public class PoorGIFeature : ScriptableRendererFeature
     {
+        [Range(0, 3)]
+        public int UpscaleType;
+
         public Material SSGIMaterial;
         private PoorGIPass _pass;
 
@@ -23,6 +26,7 @@ namespace AlexMalyutin.PoorGI
 
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
         {
+            _pass.Setup(UpscaleType);
             renderer.EnqueuePass(_pass);
         }
     }
