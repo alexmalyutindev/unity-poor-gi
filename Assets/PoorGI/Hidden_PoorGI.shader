@@ -37,7 +37,7 @@ Shader "Hidden/PoorGI"
         struct Varyings
         {
             half2 uv : TEXCOORD0;
-            half4 postionCS : SV_POSITION;
+            half4 positionCS : SV_POSITION;
         };
 
         Varyings FulscreenVertex(Attributes input)
@@ -48,7 +48,7 @@ Shader "Hidden/PoorGI"
             output.uv.y = 1.0h - output.uv.y;
             #endif
 
-            output.postionCS = half4(input.postionOS.xy * 2.0h - 1.0h, 0.0f, 1.0h);
+            output.positionCS = half4(input.postionOS.xy * 2.0h - 1.0h, 0.0f, 1.0h);
             return output;
         }
         ENDHLSL
@@ -66,10 +66,10 @@ Shader "Hidden/PoorGI"
 
             half4 Fragmet(Varyings input) : SV_Target
             {
-                // return LinearEyeDepth(SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv, 0), _ZBufferParams);
+                return LinearEyeDepth(SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv, 0), _ZBufferParams);
 
                 half depth = UNITY_RAW_FAR_CLIP_VALUE;
-                int2 coord = floor(input.postionCS.xy) * 4;
+                int2 coord = floor(input.positionCS.xy) * 4;
 
                 UNITY_LOOP
                 for (int y = 0; y < 4; y++)
@@ -162,7 +162,7 @@ Shader "Hidden/PoorGI"
 
                 half2 traceUV = input.uv;
 
-                half probeLinearDepth = LoadTraceDepth(input.postionCS.xy);
+                half probeLinearDepth = LoadTraceDepth(input.positionCS.xy);
                 half3 probeNormalWS = SamplerTraceNormals(traceUV);
                 half3 probeNormalVS = TransformWorldToCameraNormal(probeNormalWS);
 
@@ -179,7 +179,7 @@ Shader "Hidden/PoorGI"
                 for (half alpha = deltaAngle * 0.5h; alpha < TWO_PI; alpha += deltaAngle)
                 {
                     half2 rayDirection;
-                    half jitter = GRnoise2(floor(input.postionCS.xy));
+                    half jitter = GRnoise2(floor(input.positionCS.xy));
                     sincos(alpha, rayDirection.x, rayDirection.y);
                     rayDirection /= normalize(_ScreenSize.xy);
 
@@ -248,7 +248,7 @@ Shader "Hidden/PoorGI"
                 // TODO: Bilateral blur
                 half4 result = 0.0h;
                 half totalWeight = 0.0h;
-                for (half i = -5.0h; i <= 5.1h; i++)
+                for (half i = -3.0h; i <= 3.1h; i++)
                 {
                     half2 offset = blurDirection * i;
                     half4 colorDepth = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
@@ -287,7 +287,7 @@ Shader "Hidden/PoorGI"
                 // TODO: Bilateral blur
                 half4 result = 0.0h;
                 half totalWeight = 0.0h;
-                for (half i = -5.0h; i <= 5.1h; i++)
+                for (half i = -3.0h; i <= 3.1h; i++)
                 {
                     half2 offset = blurDirection * i;
                     half4 colorDepth = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
@@ -366,15 +366,30 @@ Shader "Hidden/PoorGI"
                 return mul(weights, half4x4(a, b, c, d));
                 return mul(weights, half4x4(a.aaaa, b.aaaa, c.aaaa, d.aaaa)) * 0.1;
             }
+            
+            half4 GetGI_PlusPattern(half2 positionCS, half hiLinearDepth)
+            {
+                half2 coord = positionCS / 4 + 0.5;
+                half4 a = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, (coord + half2(0, 0)) * _MainTex_TexelSize.xy, 0);
+                half4 b = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, (coord - half2(1, 0)) * _MainTex_TexelSize.xy, 0);
+                half4 c = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, (coord + half2(0, 1)) * _MainTex_TexelSize.xy, 0);
+                half4 d = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, (coord - half2(1, 1)) * _MainTex_TexelSize.xy, 0);
+
+                half4 lowDepthABCD = half4(a.a, b.a, c.a, d.a);
+                half4 weights = 1.0 / (exp(10.0h * abs(lowDepthABCD - hiLinearDepth)) + 0.01h);
+                weights /= dot(1.0h, weights);
+
+                return mul(saturate(weights), half4x4(a, b, c, d));
+            }
 
             half4 Fragmet(Varyings input) : SV_Target
             {
-                int2 traceCoord = floor(input.postionCS.xy) / 4;
+                int2 traceCoord = floor(input.positionCS.xy) / 4;
                 // TODO: Bilinear weight???
-                half2 ratio = frac(floor(input.postionCS.xy) * 0.25h);
+                half2 ratio = frac(floor(input.positionCS.xy) * 0.25h);
                 half4 bilinearWeights = GetBilinearWeights(ratio);
 
-                half hiDepth = LoadSceneDepth(floor(input.postionCS.xy));
+                half hiDepth = LoadSceneDepth(floor(input.positionCS.xy));
 
                 half4 giDepthA = LoadGI(traceCoord);
                 half4 giDepthB = LoadGI(traceCoord + int2(1, 0));
@@ -440,14 +455,18 @@ Shader "Hidden/PoorGI"
                     half3 colorCD = lerp(giDepthC * w.z, giDepthD * w.w, ratio.x);
                     return half4(lerp(colorAB, colorCD, ratio.y), 1.0h);
                 }
+                else if (_UpscaleType == 4)
+                {
+                    return GetGI_PlusPattern(input.positionCS.xy, hiDepth);
+                }
 
                 return 0;
             }
 
             half4 Fragmet2(Varyings input) : SV_Target
             {
-                uint2 traceCoord = floor(input.postionCS.xy) / 4;
-                half hiDepth = LinearEyeDepth(LoadSceneDepth(floor(input.postionCS.xy)), _ZBufferParams);
+                uint2 traceCoord = floor(input.positionCS.xy) / 4;
+                half hiDepth = LinearEyeDepth(LoadSceneDepth(floor(input.positionCS.xy)), _ZBufferParams);
 
                 half4 giDepthC = LoadGI(traceCoord);
                 half4 giDepthT = LoadGI(traceCoord + int2(0, 1));

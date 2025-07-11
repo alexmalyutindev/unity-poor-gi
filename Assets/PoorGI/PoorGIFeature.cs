@@ -5,7 +5,7 @@ namespace AlexMalyutin.PoorGI
 {
     public class PoorGIFeature : ScriptableRendererFeature
     {
-        [Range(0, 3)]
+        [Range(0, 4)]
         public int UpscaleType;
 
         public Material SSGIMaterial;

@@ -79,6 +79,7 @@ namespace AlexMalyutin.PoorGI
             var giBufferDesc = new TextureDesc(traceWidth, traceHeight)
             {
                 name = "_GIBuffer",
+                filterMode = FilterMode.Bilinear,
                 format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.ARGBFloat, isSRGB: true),
                 clearBuffer = false,
             };
