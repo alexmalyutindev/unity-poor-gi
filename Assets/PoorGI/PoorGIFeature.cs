@@ -5,6 +5,9 @@ namespace AlexMalyutin.PoorGI
 {
     public class PoorGIFeature : ScriptableRendererFeature
     {
+        [Range(0, 4)]
+        public int UpscaleType;
+
         public Material SSGIMaterial;
         private PoorGIPass _pass;
 
@@ -12,10 +15,9 @@ namespace AlexMalyutin.PoorGI
         {
             _pass = new PoorGIPass(SSGIMaterial)
             {
-                renderPassEvent = RenderPassEvent.BeforeRenderingTransparents
+                renderPassEvent = RenderPassEvent.BeforeRenderingSkybox
             };
             _pass.ConfigureInput(
-                ScriptableRenderPassInput.Color |
                 ScriptableRenderPassInput.Depth |
                 ScriptableRenderPassInput.Normal
             );
@@ -23,6 +25,8 @@ namespace AlexMalyutin.PoorGI
 
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
         {
+            if (renderingData.cameraData.isPreviewCamera) return;
+            _pass.Setup(UpscaleType);
             renderer.EnqueuePass(_pass);
         }
     }
