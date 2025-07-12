@@ -2,7 +2,8 @@ Shader "Hidden/PoorGI"
 {
     Properties
     {
-        _MainTex ("Texture", 2D) = "white" {}
+        _MainTex("Texture", 2D) = "white" {}
+        _BlurSize("Blur Size", Range(1, 6)) = 4
     }
 
     SubShader
@@ -52,7 +53,7 @@ Shader "Hidden/PoorGI"
             return positionVS.xyz;
         }
 
-        static half _BlurSize = 4.0h;
+        half _BlurSize = 4.0h;
         half4 _MainTex_TexelSize;
         TEXTURE2D(_MainTex);
 
@@ -168,6 +169,16 @@ Shader "Hidden/PoorGI"
                 return normalize(SAMPLE_TEXTURE2D_LOD(_CameraNormalsTexture, sampler_LinearClamp, uv, 0).xyz);
             }
 
+            half2 Rotate(half2 v, half a)
+            {
+                half s, c;
+                sincos(a, s, c);
+                return half2(
+                    v.x * c - v.y * s,
+                    v.x * s + v.y * c
+                );
+            }
+
             Varyings FulscreenTriangleVertex(Attributes input)
             {
                 Varyings output;
@@ -190,35 +201,38 @@ Shader "Hidden/PoorGI"
                 half2 traceUV = input.uv;
 
                 half probeLinearDepth = LoadTraceDepth(input.positionCS.xy);
-                half3 probeNormalWS = SamplerTraceNormals(traceUV);
-                half3 probeNormalVS = TransformWorldToCameraNormal(probeNormalWS);
-
-                half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth);
+                half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth - 0.01h);
 
                 half3 viewDirectionVS = -normalize(probeVS);
 
-                const int raySteps = 4;
+                const half rayLength = 0.25f;
+                const half rayCount = 8.0h;
+                const half raySteps = 16.0h;
+
                 const half rayStepsRcp = rcp(raySteps);
-                const half rayLength = 0.5f;
-                const half rayCount = 32.0h;
-                const half deltaAngle = TWO_PI / rayCount;
+                const half rayCountRcp = rcp(rayCount);
+
+                const half deltaAngle = TWO_PI * rayCountRcp;
+                const half2 rayNormalizationTerm = 1.0h / normalize(_ScreenSize.xy);
 
                 UNITY_LOOP
-                for (half alpha = deltaAngle * 0.5h; alpha < TWO_PI; alpha += deltaAngle)
+                for (half alpha = 0.0h * deltaAngle; alpha < TWO_PI - 0.01; alpha += deltaAngle)
                 {
                     half2 rayDirection;
-                    half jitter = GRnoise2(floor(input.positionCS.xy));
+                    half jitter = InterleavedGradientNoise(floor(input.positionCS.xy), 0);
                     sincos(alpha, rayDirection.x, rayDirection.y);
-                    rayDirection /= normalize(_ScreenSize.xy);
 
-                    half prevOcclusionFactor = -1.0h;
+                    half prevOcclusionFactor = -2.0h;
                     UNITY_LOOP
-                    for (half stepIndex = 0.01h; stepIndex < raySteps; stepIndex++)
+                    for (half stepIndex = 0.0h; stepIndex < raySteps; stepIndex++)
                     {
-                        half ji = (jitter + stepIndex) * rayStepsRcp;
-                        half noff = ji * ji;
+                        half ji = (jitter + stepIndex) / (raySteps - 1.0h);
+                        half noff = ji * ji; // * ji * ji;
 
-                        half2 rayUV = traceUV + rayDirection * noff * rayLength;
+                        half2 offset = rayDirection * noff * rayLength;
+                        offset = Rotate(offset, rayCountRcp * TWO_PI * (jitter - 0.5));
+                        offset *= rayNormalizationTerm;
+                        half2 rayUV = traceUV + offset;
 
                         if (any(rayUV < 0.0h || rayUV > 1.0h))
                         {
@@ -234,24 +248,22 @@ Shader "Hidden/PoorGI"
                         half VdotR = dot(viewDirectionVS, rayDirectionVS);
                         half traceDistance = length(rayVS);
 
-                        half OcclusionFactor = VdotR;
-                        half occlusion = smoothstep(prevOcclusionFactor - 0.02h, prevOcclusionFactor, OcclusionFactor);
-                        prevOcclusionFactor = max(prevOcclusionFactor, OcclusionFactor);
+                        half occlusionFactor = VdotR;
+                        half occlusion = step(prevOcclusionFactor, occlusionFactor);
+                        prevOcclusionFactor = max(prevOcclusionFactor, occlusionFactor);
 
-                        half3 current = lingting * occlusion * rayStepsRcp;
+                        half3 current = lingting * occlusion * rayStepsRcp * exp2(-traceDistance * 0.1);
                         half lum = Luminance(current);
 
                         // SH Ligting: https://deadvoxels.blogspot.com/2009/08/has-someone-tried-this-before.html
                         // Half-Life 2 Shading: https://drivers.amd.com/developer/gdc/D3DTutorial10_Half-Life2_Shading.pdf
-                        finalColor += current;
+                        finalColor += current * rayCountRcp;
                         finalSH += half4(kSHBasis1 * rayDirectionVS.xyz, kSHBasis0) * lum;
                     }
                 }
 
-                finalColor /= rayCount;
-
                 Output output;
-                output.irradianceColor = half4(finalColor, probeLinearDepth);
+                output.irradianceColor = half4(LinearToSRGB(finalColor), probeLinearDepth);
                 output.irradianceSH = finalSH;
                 return output;
             }
@@ -289,7 +301,7 @@ Shader "Hidden/PoorGI"
                     half lum = Luminance(color.rgb);
 
                     // TODO: Fix gaussian weight
-                    half weight = exp(-i * i) / exp(1.0h * abs(centerDepth - depth) * abs(centerLum - lum));
+                    half weight = exp(-i * i * 0.2) / exp(1.0h * abs(centerDepth - depth)); // * abs(centerLum - lum));
                     result += color * weight;
                     totalWeight += weight;
                 }
@@ -330,7 +342,7 @@ Shader "Hidden/PoorGI"
                     half lum = Luminance(color.rgb);
 
                     // TODO: Fix gaussian weight
-                    half weight = exp(-i * i) / exp(1.0h * abs(centerDepth - depth) * abs(centerLum - lum));
+                    half weight = exp(-i * i * 0.5) / exp(1.0h * abs(centerDepth - depth)); // * abs(centerLum - lum));
                     result += color * weight;
                     totalWeight += weight;
                 }
@@ -416,8 +428,9 @@ Shader "Hidden/PoorGI"
                 half irradiance = EvaluateIrradianceSH01(SH, N); // * 0.5 + 0.5;
                 half reflection = pow(saturate(EvaluateIrradianceSH1(SH, R)), 5.0h);
 
-                const half smoothness = 0.2h;
-                half4 ligting = lerp(irradiance, reflection, smoothness) * irradianceColor;
+                // const half smoothness = 0.5h;
+                // half4 ligting = lerp(irradiance, reflection, smoothness) * irradianceColor;
+                half4 ligting = (irradiance + reflection) * irradianceColor;
                 return ligting;
             }
 

@@ -1,6 +1,7 @@
 {
   "dependencies": {
     "com.unity.ide.rider": "3.0.36",
+    "com.unity.recorder": "5.1.2",
     "com.unity.render-pipelines.universal": "17.1.0",
     "com.unity.sponza-urp": "https://github.com/alexmalyutindev/sponza-unity-urp.git",
     "com.unity.modules.accessibility": "1.0.0",
