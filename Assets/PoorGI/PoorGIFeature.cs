@@ -26,6 +26,7 @@ namespace AlexMalyutin.PoorGI
 
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
         {
+            if (renderingData.cameraData.isPreviewCamera) return;
             _pass.Setup(UpscaleType);
             renderer.EnqueuePass(_pass);
         }

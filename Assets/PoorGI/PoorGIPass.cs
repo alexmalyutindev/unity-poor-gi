@@ -1,8 +1,11 @@
-﻿using UnityEngine;
+﻿using System;
+using System.Buffers;
+using UnityEngine;
 using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.RenderGraphModule;
 using UnityEngine.Rendering.Universal;
+using Object = UnityEngine.Object;
 
 namespace AlexMalyutin.PoorGI
 {
@@ -11,9 +14,50 @@ namespace AlexMalyutin.PoorGI
         private readonly Material _ssgiMaterial;
         private int _upscaleType;
 
+        private static Mesh _triangleMesh;
+
         public PoorGIPass(Material ssgiMaterial)
         {
             _ssgiMaterial = ssgiMaterial;
+
+            /*UNITY_NEAR_CLIP_VALUE*/
+            float nearClipZ = SystemInfo.usesReversedZBuffer ? 1 : -1;
+            if (!_triangleMesh)
+            {
+                _triangleMesh = new Mesh();
+                _triangleMesh.hideFlags = HideFlags.DontSave;
+                _triangleMesh.vertices = GetFullScreenTriangleVertexPosition(nearClipZ);
+                _triangleMesh.uv = GetFullScreenTriangleTexCoord();
+                _triangleMesh.triangles = new int[3] { 0, 1, 2 };
+            }
+        }
+
+        // Should match Common.hlsl
+        static Vector3[] GetFullScreenTriangleVertexPosition(float z /*= UNITY_NEAR_CLIP_VALUE*/)
+        {
+            var r = new Vector3[3];
+            for (int i = 0; i < 3; i++)
+            {
+                Vector2 uv = new Vector2((i << 1) & 2, i & 2);
+                r[i] = new Vector3(uv.x * 2.0f - 1.0f, uv.y * 2.0f - 1.0f, z);
+            }
+
+            return r;
+        }
+
+        // Should match Common.hlsl
+        static Vector2[] GetFullScreenTriangleTexCoord()
+        {
+            var r = new Vector2[3];
+            for (int i = 0; i < 3; i++)
+            {
+                if (SystemInfo.graphicsUVStartsAtTop)
+                    r[i] = new Vector2((i << 1) & 2, 1.0f - (i & 2));
+                else
+                    r[i] = new Vector2((i << 1) & 2, i & 2);
+            }
+
+            return r;
         }
 
         public void Setup(int upscaleType)
@@ -30,7 +74,8 @@ namespace AlexMalyutin.PoorGI
             public TextureHandle TraceDepth;
 
             public TextureHandle GIBuffer;
-            public TextureHandle GIBufferTemp;
+            public TextureHandle TempBlurBuffer;
+            public TextureHandle SHBuffer;
 
             public TextureHandle CameraColorTarget;
 
@@ -80,13 +125,16 @@ namespace AlexMalyutin.PoorGI
             {
                 name = "_GIBuffer",
                 filterMode = FilterMode.Bilinear,
-                format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.ARGBFloat, isSRGB: true),
+                format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.ARGBFloat, isSRGB: false),
                 clearBuffer = false,
             };
             passData.GIBuffer = renderGraph.CreateTexture(giBufferDesc);
             builder.UseTexture(passData.GIBuffer);
             giBufferDesc.name = "_GIBuffer_Temp";
-            passData.GIBufferTemp = builder.CreateTransientTexture(giBufferDesc);
+            passData.TempBlurBuffer = builder.CreateTransientTexture(giBufferDesc);
+
+            giBufferDesc.name = "_SHBuffer_Temp";
+            passData.SHBuffer = builder.CreateTransientTexture(giBufferDesc);
 
             builder.SetRenderFunc<PassData>(static (data, context) =>
             {
@@ -102,18 +150,61 @@ namespace AlexMalyutin.PoorGI
                 cmd.Blit(data.CameraDepth, data.TraceDepth, data.SSGIMaterial, DownSampleDepthPass);
 
                 // Tracing
-                cmd.Blit(data.TraceDepth, data.GIBuffer, data.SSGIMaterial, TracePass);
+                {
+                    var targets = ArrayPool<RenderTargetIdentifier>.Shared.Rent(2);
+                    var load = ArrayPool<RenderBufferLoadAction>.Shared.Rent(2);
+                    var store = ArrayPool<RenderBufferStoreAction>.Shared.Rent(2);
+
+                    targets[0] = data.GIBuffer;
+                    load[0] = RenderBufferLoadAction.DontCare;
+                    store[0] = RenderBufferStoreAction.Store;
+
+                    targets[1] = data.SHBuffer;
+                    load[1] = RenderBufferLoadAction.DontCare;
+                    store[1] = RenderBufferStoreAction.Store;
+
+                    var bindings = new RenderTargetBinding()
+                    {
+                        colorRenderTargets = targets[..2],
+                        colorLoadActions = load[..2],
+                        colorStoreActions = store[..2],
+                        depthRenderTarget = data.GIBuffer,
+                        flags = RenderTargetFlags.None,
+                    };
+
+                    ArrayPool<RenderTargetIdentifier>.Shared.Return(targets);
+                    ArrayPool<RenderBufferLoadAction>.Shared.Return(load);
+                    ArrayPool<RenderBufferStoreAction>.Shared.Return(store);
+
+                    cmd.SetRenderTarget(bindings);
+                    // TODO: Pass With MaterialPropBlock.
+                    cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
+                    cmd.DrawMesh(_triangleMesh, Matrix4x4.identity, data.SSGIMaterial, 0, TracePass);
+                    // cmd.Blit(data.TraceDepth, data.GIBuffer, data.SSGIMaterial, TracePass);
+                }
 
                 // Blur GI
-                cmd.Blit(data.GIBuffer, data.GIBufferTemp, data.SSGIMaterial, BlurHorizontalPass);
-                cmd.Blit(data.GIBufferTemp, data.GIBuffer, data.SSGIMaterial, BlurVerticalPass);
+                {
+                    cmd.SetGlobalTexture("_RefrenceDepth", data.TraceDepth);
+                    cmd.Blit(data.GIBuffer, data.TempBlurBuffer, data.SSGIMaterial, BlurHorizontalPass);
+                    cmd.Blit(data.TempBlurBuffer, data.GIBuffer, data.SSGIMaterial, BlurVerticalPass);
+
+                    cmd.Blit(data.SHBuffer, data.TempBlurBuffer, data.SSGIMaterial, BlurHorizontalPass);
+                    cmd.Blit(data.TempBlurBuffer, data.SHBuffer, data.SSGIMaterial, BlurVerticalPass);
+                }
 
                 // Upscaling
                 cmd.SetGlobalInteger("_UpscaleType", data.UpsaleType);
                 cmd.SetGlobalVector("_TraceSize", new Vector4(data.TraceWidth, data.TraceHeight));
                 cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
+                cmd.SetGlobalTexture("_SHBuffer", data.SHBuffer);
                 cmd.Blit(data.GIBuffer, data.CameraColorTarget, data.SSGIMaterial, BilateralUpsamplePass);
             });
+        }
+
+        public static void CleanUp()
+        {
+            if (_triangleMesh) Object.DestroyImmediate(_triangleMesh);
         }
     }
 }

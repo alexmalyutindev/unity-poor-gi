@@ -25,6 +25,48 @@ Shader "Hidden/PoorGI"
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareNormalsTexture.hlsl"
         #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/GlobalSamplers.hlsl"
 
+        #if 0
+        static const half3 basisX = half3( sqrt(1.0h / 2.0h), -sqrt(1.0h / 6.0h), sqrt(1.0h / 3.0h));
+        static const half3 basisY = half3(              0.0h,  sqrt(2.0h / 3.0h), sqrt(1.0h / 3.0h));
+        static const half3 basisZ = half3(-sqrt(1.0h / 2.0h), -sqrt(1.0h / 6.0h), sqrt(1.0h / 3.0h));
+        #elif 0
+        static const half3 basisX = half3( sqrt(1.0h / 2.0h), sqrt(1.0h / 3.0h),  sqrt(1.0h / 6.0h));
+        static const half3 basisY = half3(              0.0h, sqrt(1.0h / 3.0h), -sqrt(2.0h / 3.0h));
+        static const half3 basisZ = half3(-sqrt(1.0h / 2.0h), sqrt(1.0h / 3.0h),  sqrt(1.0h / 6.0h));
+        #else
+        static const half3 basisX = half3(1, 0, 0);
+        static const half3 basisY = half3(0, 1, 0);
+        static const half3 basisZ = half3(0, 0, 1);
+        #endif
+
+        // Funcs
+        half3 TransformWorldToCameraNormal(half3 normalWS)
+        {
+            return normalize(mul(unity_WorldToCamera, half4(normalWS, 0.0h)).xyz);
+        }
+
+        half3 TransformScreenUVToView(half2 uv, half depth)
+        {
+            half4 positionVS = mul(
+                UNITY_MATRIX_I_P,
+                half4(mad(uv, half2(2.0h, -2.0h), half2(-1.0h, 1.0h)), depth, 1.0h)
+            );
+            positionVS.z = -positionVS.z;
+            return positionVS.xyz / positionVS.w;
+        }
+
+        half3 TransformScreenUVToViewLinear(half2 uv, half linearDepth)
+        {
+            half4 positionVS = mul(
+                UNITY_MATRIX_I_P,
+                half4(mad(uv, half2(-2.0h, 2.0h), half2(1.0h, -1.0h)), UNITY_RAW_FAR_CLIP_VALUE, 1.0h)
+            );
+            positionVS.xyz /= positionVS.w;
+            positionVS.xyz *= linearDepth / positionVS.z;
+            return positionVS.xyz;
+        }
+
+        static half _BlurSize = 5.0h;
         half4 _MainTex_TexelSize;
         TEXTURE2D(_MainTex);
 
@@ -66,7 +108,8 @@ Shader "Hidden/PoorGI"
 
             half4 Fragmet(Varyings input) : SV_Target
             {
-                return LinearEyeDepth(SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv, 0), _ZBufferParams);
+                return LinearEyeDepth(
+                    SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv, 0), _ZBufferParams);
 
                 half depth = UNITY_RAW_FAR_CLIP_VALUE;
                 int2 coord = floor(input.positionCS.xy) * 4;
@@ -95,9 +138,15 @@ Shader "Hidden/PoorGI"
         {
             Name "GI Trace"
 
+            Cull Back
+
             HLSLPROGRAM
-            #pragma vertex FulscreenVertex
+            #pragma vertex FulscreenTriangleVertex
             #pragma fragment Fragmet
+
+            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/SphericalHarmonics.hlsl"
+
+            Texture2D<half> _TraceDepth;
 
             half GRnoise2(half2 xy)
             {
@@ -107,48 +156,24 @@ Shader "Hidden/PoorGI"
                 return n < 0.5 ? 2.0 * n : 2.0 - 2.0 * n;
             }
 
-            half3 TransformScreenUVToView(half2 uv, half depth)
-            {
-                half4 positionVS = mul(
-                    UNITY_MATRIX_I_P,
-                    half4(mad(uv, half2(2.0h, -2.0h), half2(-1.0h, 1.0h)), depth, 1.0h)
-                );
-                positionVS.z = -positionVS.z;
-                return positionVS.xyz / positionVS.w;
-            }
-
-            half3 TransformScreenUVToViewLinear(half2 uv, half linearDepth)
-            {
-                half4 positionVS = mul(
-                    UNITY_MATRIX_I_P,
-                    half4(mad(uv, half2(-2.0h, 2.0h), half2(1.0h, -1.0h)), UNITY_RAW_FAR_CLIP_VALUE, 1.0h)
-                );
-                positionVS.xyz /= positionVS.w;
-                positionVS.xyz *= linearDepth / positionVS.z;
-                return positionVS.xyz;
-            }
-
-            half3 TransformWorldToCameraNormal(half3 normalWS)
-            {
-                return normalize(mul(unity_WorldToCamera, half4(normalWS, 0.0h)).xyz);
-            }
-
             half3 SampleTraceLighting(half2 uv)
             {
                 // TODO: Blur SceneColor!
                 half3 color = SAMPLE_TEXTURE2D_LOD(_CameraOpaqueTexture, sampler_LinearClamp, uv, 0).rgb;
-                half luminance = Luminance(color) - 0.9h;
-                return color * max(0.0h, luminance);
-            }
-
-            half SampleTraceLinearDepth(half2 uv)
-            {
-                return SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_PointClamp, uv, 0);
+                return color;
+                half luminance = Luminance(color);
+                return color * step(0.9h, luminance);
+                return color * max(0.0h, luminance - 0.9h);
             }
 
             half LoadTraceDepth(uint2 coord)
             {
-                return LOAD_TEXTURE2D_LOD(_MainTex, coord, 0).r;
+                return LOAD_TEXTURE2D_LOD(_TraceDepth, coord, 0).r;
+            }
+
+            half SampleTraceLinearDepth(half2 uv)
+            {
+                return SAMPLE_DEPTH_TEXTURE_LOD(_TraceDepth, sampler_PointClamp, uv, 0);
             }
 
             half3 SamplerTraceNormals(half2 uv)
@@ -156,9 +181,24 @@ Shader "Hidden/PoorGI"
                 return normalize(SAMPLE_TEXTURE2D_LOD(_CameraNormalsTexture, sampler_LinearClamp, uv, 0).xyz);
             }
 
-            half4 Fragmet(Varyings input) : SV_Target
+            Varyings FulscreenTriangleVertex(Attributes input)
             {
-                half3 gi = 0.0h;
+                Varyings output;
+                output.uv = input.texcoord;
+                output.positionCS = half4(input.postionOS.xy, 0.0h, 1.0h);
+                return output;
+            }
+
+            struct Output
+            {
+                half4 irradianceColor : SV_Target0;
+                half4 irradianceSH : SV_Target1;
+            };
+
+            Output Fragmet(Varyings input)
+            {
+                half3 finalColor = 0.0h;
+                half4 finalSH = 0.0h;
 
                 half2 traceUV = input.uv;
 
@@ -171,8 +211,9 @@ Shader "Hidden/PoorGI"
                 half3 viewDirectionVS = -normalize(probeVS);
 
                 const int raySteps = 4;
+                const half rayStepsRCP = rcp(raySteps);
                 const half rayLength = 0.5f;
-                const half rayCount = 32.0h;
+                const half rayCount = 16.0h;
                 const half deltaAngle = TWO_PI / rayCount;
 
                 UNITY_LOOP
@@ -183,11 +224,11 @@ Shader "Hidden/PoorGI"
                     sincos(alpha, rayDirection.x, rayDirection.y);
                     rayDirection /= normalize(_ScreenSize.xy);
 
-                    half prevNdotR = -1.0h;
+                    half prevOcclusionFactor = -1.0h;
                     UNITY_LOOP
                     for (half stepIndex = 0.75h; stepIndex < raySteps; stepIndex++)
                     {
-                        half ji = (jitter + stepIndex) / raySteps;
+                        half ji = (jitter + stepIndex) * rayStepsRCP;
                         half noff = ji * ji;
 
                         half2 rayUV = traceUV + rayDirection * noff * rayLength;
@@ -205,24 +246,35 @@ Shader "Hidden/PoorGI"
                         half3 rayVS = TransformScreenUVToViewLinear(rayUV, linearDepth);
                         half3 rayDirVS = rayVS - probeVS;
                         half3 rayDirectionVS = normalize(rayDirVS);
-
-                        half NdotR = dot(probeNormalVS, rayDirectionVS);
                         half VdotR = dot(viewDirectionVS, rayDirectionVS);
-                        half surfNdotR = dot(surfNormalVS, -rayDirectionVS);
-                        half surfNdotN = 1.0h - abs(dot(surfNormalVS, probeNormalVS));
-
                         half traceDistance = length(rayDirVS);
 
-                        half lambetian = saturate(NdotR);
-                        half occlusion = step(prevNdotR, NdotR);
-                        prevNdotR = max(prevNdotR, NdotR);
+                        half OcclusionFactor = VdotR;
+                        half occlusion = smoothstep(prevOcclusionFactor - 0.01h, prevOcclusionFactor, OcclusionFactor);
+                        prevOcclusionFactor = max(prevOcclusionFactor, OcclusionFactor);
 
-                        // TODO: Compute SH.
-                        gi += lingting * lambetian * occlusion * exp2(-traceDistance * 0.2h) / raySteps;
+                        half3 current = lingting * occlusion * rayStepsRCP * exp2(-traceDistance * 0.1);
+                        half lum = Luminance(current);
+
+                        finalColor += current;
+
+                        finalSH.w += kSHBasis0 * lum;
+                        finalSH.x += kSHBasis1 * dot(rayDirectionVS, basisX) * lum;
+                        finalSH.y += kSHBasis1 * dot(rayDirectionVS, basisY) * lum;
+                        finalSH.z += kSHBasis1 * dot(rayDirectionVS, basisZ) * lum;
                     }
                 }
 
-                return half4(gi / rayCount, probeLinearDepth);
+                finalColor /= rayCount;
+
+                // TODO: Compute SH: https://deadvoxels.blogspot.com/2009/08/has-someone-tried-this-before.html
+                // - Use 3 targets (rgb x3 + aaa for storing 4 coefs)
+                // - Resolve with normals on final blit stage
+                // - Try to do specular with dominant from SH
+                Output output;
+                output.irradianceColor = half4(finalColor, probeLinearDepth);
+                output.irradianceSH = finalSH;
+                return output;
             }
             ENDHLSL
         }
@@ -237,31 +289,33 @@ Shader "Hidden/PoorGI"
             #pragma vertex FulscreenVertex
             #pragma fragment Fragmet
 
+            Texture2D<half> _RefrenceDepth;
+
             half4 Fragmet(Varyings input) : SV_Target
             {
                 const half2 blurDirection = half2(_MainTex_TexelSize.x, 0.0h);
 
-                // NOTE: Input is GI+Depth
-                half4 centerColorDepth = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv);
-                half centerLum = Luminance(centerColorDepth.rgb);
+                half4 centerColor = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv);
+                half centerDepth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv);
+                half centerLum = Luminance(centerColor.rgb);
 
                 // TODO: Bilateral blur
                 half4 result = 0.0h;
                 half totalWeight = 0.0h;
-                for (half i = -3.0h; i <= 3.1h; i++)
+                for (half i = -_BlurSize; i <= _BlurSize + 0.1h; i++)
                 {
                     half2 offset = blurDirection * i;
-                    half4 colorDepth = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
-                    half lum = Luminance(colorDepth.rgb);
+                    half4 color = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
+                    half depth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv + offset);
+                    half lum = Luminance(color.rgb);
 
-                    // TODO: Add gaussian weight
-                    half weight = exp(-i * i) / exp(10.0h * abs(centerColorDepth.a - colorDepth.a) * abs(centerLum - lum));
-                    result += colorDepth * weight;
+                    // TODO: Fix gaussian weight
+                    half weight = exp(-i * i) / exp(10.0h * abs(centerDepth - depth) * abs(centerLum - lum));
+                    result += color * weight;
                     totalWeight += weight;
                 }
 
-                // return result / totalWeight;
-                return half4(result.rgb / totalWeight, centerColorDepth.a);
+                return result / totalWeight;
             }
             ENDHLSL
         }
@@ -276,30 +330,33 @@ Shader "Hidden/PoorGI"
             #pragma vertex FulscreenVertex
             #pragma fragment Fragmet
 
+            Texture2D<half> _RefrenceDepth;
+
             half4 Fragmet(Varyings input) : SV_Target
             {
                 const half2 blurDirection = half2(0.0h, _MainTex_TexelSize.y);
 
-                // NOTE: Input is GI+Depth
-                half4 centerColorDepth = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv);
-                half centerLum = Luminance(centerColorDepth.rgb);
+                half4 centerColor = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv);
+                half centerDepth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv);
+                half centerLum = Luminance(centerColor.rgb);
 
                 // TODO: Bilateral blur
                 half4 result = 0.0h;
                 half totalWeight = 0.0h;
-                for (half i = -3.0h; i <= 3.1h; i++)
+                for (half i = -_BlurSize; i <= _BlurSize + 0.1h; i++)
                 {
                     half2 offset = blurDirection * i;
-                    half4 colorDepth = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
-                    half lum = Luminance(colorDepth.rgb);
+                    half4 color = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
+                    half depth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv + offset);
+                    half lum = Luminance(color.rgb);
 
-                    half weight = exp(-i * i) / exp(10.0h * abs(centerColorDepth.a - colorDepth.a) * abs(centerLum - lum));
-                    result += colorDepth * weight;
+                    // TODO: Fix gaussian weight
+                    half weight = exp(-i * i) / exp(10.0h * abs(centerDepth - depth) * abs(centerLum - lum));
+                    result += color * weight;
                     totalWeight += weight;
                 }
 
-                // return result / totalWeight;
-                return half4(result.rgb / totalWeight, centerColorDepth.a);
+                return result / totalWeight;
             }
             ENDHLSL
         }
@@ -314,10 +371,13 @@ Shader "Hidden/PoorGI"
             #pragma vertex FulscreenVertex
             #pragma fragment Fragmet
 
+            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/SphericalHarmonics.hlsl"
+
             int _UpscaleType;
             half4 _TraceSize;
             half4 _TraceDepth_TexelSize;
-            TEXTURE2D(_TraceDepth);
+            Texture2D<half> _TraceDepth;
+            Texture2D<half4> _SHBuffer;
 
             half4 LinearEyeDepth(half4 depth)
             {
@@ -366,20 +426,55 @@ Shader "Hidden/PoorGI"
                 return mul(weights, half4x4(a, b, c, d));
                 return mul(weights, half4x4(a.aaaa, b.aaaa, c.aaaa, d.aaaa)) * 0.1;
             }
-            
+
             half4 GetGI_PlusPattern(half2 positionCS, half hiLinearDepth)
             {
                 half2 coord = positionCS / 4 + 0.5;
-                half4 a = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, (coord + half2(0, 0)) * _MainTex_TexelSize.xy, 0);
-                half4 b = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, (coord - half2(1, 0)) * _MainTex_TexelSize.xy, 0);
-                half4 c = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, (coord + half2(0, 1)) * _MainTex_TexelSize.xy, 0);
-                half4 d = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, (coord - half2(1, 1)) * _MainTex_TexelSize.xy, 0);
+                half2 texel = _MainTex_TexelSize.xy;
 
-                half4 lowDepthABCD = half4(a.a, b.a, c.a, d.a);
-                half4 weights = 1.0 / (exp(10.0h * abs(lowDepthABCD - hiLinearDepth)) + 0.01h);
-                weights /= dot(1.0h, weights);
+                half2 center = coord * texel;
+                half3 offsets = half3(texel.xy, 0.0h);
 
-                return mul(saturate(weights), half4x4(a, b, c, d));
+                half3 V = TransformScreenUVToViewLinear(center, hiLinearDepth);
+                V = -normalize(V);
+
+                half4 lowDepthABCD;
+                lowDepthABCD.x = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, center + offsets.xz, 0);
+                lowDepthABCD.y = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, center - offsets.xz, 0);
+                lowDepthABCD.z = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, center + offsets.zy, 0);
+                lowDepthABCD.w = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, center - offsets.zy, 0);
+
+                half4 a = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, center + offsets.xz, 0);
+                half4 b = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, center - offsets.xz, 0);
+                half4 c = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, center + offsets.zy, 0);
+                half4 d = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, center - offsets.zy, 0);
+
+                half4 shA = SAMPLE_TEXTURE2D_LOD(_SHBuffer, sampler_LinearClamp, center + offsets.xz, 0);
+                half4 shB = SAMPLE_TEXTURE2D_LOD(_SHBuffer, sampler_LinearClamp, center - offsets.xz, 0);
+                half4 shC = SAMPLE_TEXTURE2D_LOD(_SHBuffer, sampler_LinearClamp, center + offsets.zy, 0);
+                half4 shD = SAMPLE_TEXTURE2D_LOD(_SHBuffer, sampler_LinearClamp, center - offsets.zy, 0);
+
+                half4 weights = 1.0 / (exp(10.0h * abs(hiLinearDepth - lowDepthABCD)) + 0.01h);
+                weights = saturate(weights / dot(1.0h, weights));
+
+                half4 irradianceColor = mul(weights, half4x4(a, b, c, d));
+                half4 sh = mul(weights, half4x4(shA, shB, shC, shD));
+
+                half3 normalWS = LoadSceneNormals(positionCS);
+                half3 N = TransformWorldToCameraNormal(normalWS);
+
+                half irradiance = sh.w +
+                    sh.x * dot(N, basisX) +
+                    sh.y * dot(N, basisY) +
+                    sh.z * dot(N, basisZ);
+
+                half3 R = reflect(-V, N);
+                half reflection =
+                    sh.x * dot(R, basisX) +
+                    sh.y * dot(R, basisY) +
+                    sh.z * dot(R, basisZ);
+
+                return irradiance * irradianceColor + pow(saturate(reflection), 5) * irradianceColor;
             }
 
             half4 Fragmet(Varyings input) : SV_Target
