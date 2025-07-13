@@ -136,6 +136,7 @@ Shader "Hidden/PoorGI"
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/SphericalHarmonics.hlsl"
 
             Texture2D<half> _TraceDepth;
+            Texture2D<half2> _VarianceDepth;
             Texture2D<half4> _TraceColor;
 
             half GRnoise2(half2 xy)
@@ -161,7 +162,12 @@ Shader "Hidden/PoorGI"
 
             half SampleTraceLinearDepth(half2 uv)
             {
-                return SAMPLE_DEPTH_TEXTURE_LOD(_TraceDepth, sampler_PointClamp, uv, 0);
+                return SAMPLE_DEPTH_TEXTURE_LOD(_TraceDepth, sampler_PointClamp, uv, 0).x;
+            }
+            half SampleVarianceDepth(half2 uv)
+            {
+                half2 moments = SAMPLE_TEXTURE2D_LOD(_VarianceDepth, sampler_LinearClamp, uv, 0).xy;
+                return moments.x + sqrt(max(0.0, moments.y - moments.x * moments.x));
             }
 
             half3 SamplerTraceNormals(half2 uv)
@@ -227,7 +233,7 @@ Shader "Hidden/PoorGI"
                     for (half stepIndex = 0.0h; stepIndex < raySteps; stepIndex++)
                     {
                         half ji = (jitter + stepIndex) / (raySteps - 1.0h);
-                        half noff = ji * ji; // * ji * ji;
+                        half noff = ji * ji;
 
                         half2 offset = rayDirection * noff * rayLength;
                         offset = Rotate(offset, rayCountRcp * TWO_PI * (jitter - 0.5));
@@ -240,15 +246,17 @@ Shader "Hidden/PoorGI"
                         }
 
                         half linearDepth = SampleTraceLinearDepth(rayUV);
+                        // half linearDepth = SampleVarianceDepth(rayUV);
                         half3 lingting = SampleTraceLighting(rayUV);
 
                         half3 rayPositionVS = TransformScreenUVToViewLinear(rayUV, linearDepth);
                         half3 rayVS = rayPositionVS - probeVS;
                         half3 rayDirectionVS = normalize(rayVS);
-                        half VdotR = dot(viewDirectionVS, rayDirectionVS);
+
+                        half VdotR_near = dot(viewDirectionVS, rayDirectionVS);
                         half traceDistance = length(rayVS);
 
-                        half occlusionFactor = VdotR;
+                        half occlusionFactor = VdotR_near;
                         half occlusion = step(prevOcclusionFactor, occlusionFactor);
                         prevOcclusionFactor = max(prevOcclusionFactor, occlusionFactor);
 
@@ -385,7 +393,7 @@ Shader "Hidden/PoorGI"
 
             half4 SampleGI(half2 positionCS, half hiLinearDepth)
             {
-                half2 coord = positionCS * 0.25h - 0.5h;
+                half2 coord = positionCS * 0.25h;
                 half2 texel = _MainTex_TexelSize.xy;
 
                 half2 center = coord * texel;
@@ -439,6 +447,51 @@ Shader "Hidden/PoorGI"
                 half hiDepth = LoadSceneDepth(floor(input.positionCS.xy));
                 hiDepth = LinearEyeDepth(hiDepth, _ZBufferParams);
                 return SampleGI(input.positionCS.xy, hiDepth);
+            }
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "VarianceDepth"
+
+            ColorMask RG
+
+            HLSLPROGRAM
+            #pragma vertex FulscreenVertex
+            #pragma fragment Fragmet
+
+            static const half Filter[4][4] =
+            {
+                1, 3, 3, 1,
+                3, 9, 9, 3,
+                3, 9, 9, 3,
+                1, 3, 3, 1
+            };
+            
+            half2 Fragmet(Varyings input) : SV_Target
+            {
+                half4x4 depth;
+                int2 coord = floor(input.positionCS) * 4;
+
+                for (int y = 0; y < 4; y++)
+                {
+                    for (int x = 0; x < 4; x++)
+                    {
+                        depth[x][y] = LOAD_TEXTURE2D_LOD(_MainTex, coord + int2(x, y), 0).x;
+                    }
+                }
+
+                half2 varianceDepth = 0.0h;
+                for (int y = 0; y < 4; y++)
+                {
+                    for (int x = 0; x < 4; x++)
+                    {
+                        half d = LinearEyeDepth(depth[x][y], _ZBufferParams);
+                        // TODO: Gausian veights.
+                        varianceDepth += half2(d, d * d) * Filter[x][y] / 64.0h;
+                    }
+                }
+                return varianceDepth;
             }
             ENDHLSL
         }

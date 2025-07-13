@@ -34,6 +34,7 @@ namespace AlexMalyutin.PoorGI
             public int TraceWidth;
             public int TraceHeight;
             public TextureHandle TraceDepth;
+            public TextureHandle VarianceDepth;
 
             public TextureHandle GIBuffer;
             public TextureHandle TempTraceBuffer;
@@ -83,7 +84,15 @@ namespace AlexMalyutin.PoorGI
             };
             passData.TraceDepth = builder.CreateTransientTexture(traceDepthDesc);
 
-            var giBufferDesc = new TextureDesc(traceWidth, traceHeight)
+            // NOTE: Disable variance depth for now.
+            // var varianceDepthDesc = new TextureDesc(traceBufferWidth, traceBufferHeight)
+            // {
+            //     name = "_VarianceDepth",
+            //     format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.RGHalf, false),
+            // };
+            // passData.VarianceDepth = builder.CreateTransientTexture(varianceDepthDesc);
+
+            var giBufferDesc = new TextureDesc(traceBufferWidth, traceBufferHeight)
             {
                 name = "_IrradianceBuffer",
                 filterMode = FilterMode.Bilinear,
@@ -107,11 +116,15 @@ namespace AlexMalyutin.PoorGI
                 const int BlurHorizontalPass = 2;
                 const int BlurVerticalPass = 3;
                 const int BilateralUpsamplePass = 4;
+                const int VarianceDepthPass = 5;
 
                 var cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
 
                 // Downsample Depth
                 cmd.Blit(data.CameraDepth, data.TraceDepth, data.SSGIMaterial, DownSampleDepthPass);
+                
+                // Variance Depth
+                // cmd.Blit(data.CameraDepth, data.VarianceDepth, data.SSGIMaterial, VarianceDepthPass);
 
                 // Downsample Color
                 cmd.Blit(data.CameraColorTarget, data.TempTraceBuffer);
@@ -122,8 +135,10 @@ namespace AlexMalyutin.PoorGI
                     cmd.SetRenderTarget(bindings);
 
                     // TODO: Pass With MaterialPropBlock.
-                    cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
                     cmd.SetGlobalTexture("_TraceColor", data.TempTraceBuffer);
+                    cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
+                    // cmd.SetGlobalTexture("_VarianceDepth", data.VarianceDepth);
+                    
                     cmd.DrawMesh(_triangleMesh, Matrix4x4.identity, data.SSGIMaterial, 0, TracePass);
                 }
 
