@@ -3,7 +3,8 @@ Shader "Hidden/PoorGI"
     Properties
     {
         _MainTex("Texture", 2D) = "white" {}
-        _BlurSize("Blur Size", Range(1, 6)) = 4
+        _BlurSize("_BlurSize", Range(1, 6)) = 4
+        _RayLength("_RayLength", Range(0.1, 1.0)) = 0.5
     }
 
     SubShader
@@ -135,6 +136,7 @@ Shader "Hidden/PoorGI"
 
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/SphericalHarmonics.hlsl"
 
+            half _RayLength;
             Texture2D<half> _TraceDepth;
             Texture2D<half2> _VarianceDepth;
             Texture2D<half4> _TraceColor;
@@ -211,7 +213,6 @@ Shader "Hidden/PoorGI"
 
                 half3 viewDirectionVS = -normalize(probeVS);
 
-                const half rayLength = 0.25f;
                 const half rayCount = 8.0h;
                 const half raySteps = 16.0h;
 
@@ -235,7 +236,7 @@ Shader "Hidden/PoorGI"
                         half ji = (jitter + stepIndex) / (raySteps - 1.0h);
                         half noff = ji * ji;
 
-                        half2 offset = rayDirection * noff * rayLength;
+                        half2 offset = rayDirection * noff * _RayLength;
                         offset = Rotate(offset, rayCountRcp * TWO_PI * (jitter - 0.5));
                         offset *= rayNormalizationTerm;
                         half2 rayUV = traceUV + offset;
@@ -271,7 +272,7 @@ Shader "Hidden/PoorGI"
                 }
 
                 Output output;
-                output.irradianceColor = half4(LinearToSRGB(finalColor), probeLinearDepth);
+                output.irradianceColor = half4(finalColor, probeLinearDepth);
                 output.irradianceSH = finalSH;
                 return output;
             }
@@ -293,12 +294,8 @@ Shader "Hidden/PoorGI"
             half4 Fragmet(Varyings input) : SV_Target
             {
                 const half2 blurDirection = half2(_MainTex_TexelSize.x, 0.0h);
-
-                half4 centerColor = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv);
                 half centerDepth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv);
-                half centerLum = Luminance(centerColor.rgb);
 
-                // TODO: Bilateral blur
                 half4 result = 0.0h;
                 half totalWeight = 0.0h;
                 for (half i = -_BlurSize; i <= _BlurSize + 0.1h; i++)
@@ -306,10 +303,7 @@ Shader "Hidden/PoorGI"
                     half2 offset = blurDirection * i;
                     half4 color = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
                     half depth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv + offset);
-                    half lum = Luminance(color.rgb);
-
-                    // TODO: Fix gaussian weight
-                    half weight = exp(-i * i * 0.2) / exp(1.0h * abs(centerDepth - depth)); // * abs(centerLum - lum));
+                    half weight = 1.0h / exp(10.0h * abs(centerDepth - depth));
                     result += color * weight;
                     totalWeight += weight;
                 }
@@ -334,12 +328,8 @@ Shader "Hidden/PoorGI"
             half4 Fragmet(Varyings input) : SV_Target
             {
                 const half2 blurDirection = half2(0.0h, _MainTex_TexelSize.y);
-
-                half4 centerColor = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv);
                 half centerDepth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv);
-                half centerLum = Luminance(centerColor.rgb);
 
-                // TODO: Bilateral blur
                 half4 result = 0.0h;
                 half totalWeight = 0.0h;
                 for (half i = -_BlurSize; i <= _BlurSize + 0.1h; i++)
@@ -347,10 +337,7 @@ Shader "Hidden/PoorGI"
                     half2 offset = blurDirection * i;
                     half4 color = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
                     half depth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv + offset);
-                    half lum = Luminance(color.rgb);
-
-                    // TODO: Fix gaussian weight
-                    half weight = exp(-i * i * 0.5) / exp(1.0h * abs(centerDepth - depth)); // * abs(centerLum - lum));
+                    half weight = 1.0h / exp(10.0h * abs(centerDepth - depth));
                     result += color * weight;
                     totalWeight += weight;
                 }
@@ -433,13 +420,13 @@ Shader "Hidden/PoorGI"
                 half4 irradianceColor = mul(weights, half4x4(colorA, colorB, colorC, colorD));
                 half4 SH = mul(weights, half4x4(shA, shB, shC, shD));
 
-                half irradiance = EvaluateIrradianceSH01(SH, N); // * 0.5 + 0.5;
+                half irradiance = max(0.0h, EvaluateIrradianceSH01(SH, N));
                 half reflection = pow(saturate(EvaluateIrradianceSH1(SH, R)), 5.0h);
 
                 // const half smoothness = 0.5h;
                 // half4 ligting = lerp(irradiance, reflection, smoothness) * irradianceColor;
                 half4 ligting = (irradiance + reflection) * irradianceColor;
-                return ligting;
+                return LinearToSRGB(ligting);
             }
 
             half4 Fragmet(Varyings input) : SV_Target
