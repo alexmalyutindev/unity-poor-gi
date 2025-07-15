@@ -16,6 +16,7 @@ Core Approach
 Notes
 -----
 - Designed for experimentation and learning rather than production use
+- Special thanks to [Zenteon](https://github.com/Zenteon) for his great [video about GI](https://www.youtube.com/watch?v=dmdyqzelBIY) [[repo](https://github.com/Zenteon/ZenteonFX)]
 
 License
 -------
