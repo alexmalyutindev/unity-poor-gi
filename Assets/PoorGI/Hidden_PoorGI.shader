@@ -214,7 +214,7 @@ Shader "Hidden/PoorGI"
                 half3 viewDirectionVS = -normalize(probeVS);
 
                 const half rayCount = 8.0h;
-                const half raySteps = 16.0h;
+                const half raySteps = 4.0h;
 
                 const half rayStepsRcp = rcp(raySteps);
                 const half rayCountRcp = rcp(rayCount);
@@ -222,11 +222,13 @@ Shader "Hidden/PoorGI"
                 const half deltaAngle = TWO_PI * rayCountRcp;
                 const half2 rayNormalizationTerm = 1.0h / normalize(_ScreenSize.xy);
 
+                half jitter = InterleavedGradientNoise(floor(input.positionCS.xy), 0);
+                half jitter2 = InterleavedGradientNoise(floor(input.positionCS.yx), 1);
+
                 UNITY_LOOP
-                for (half alpha = 0.0h * deltaAngle; alpha < TWO_PI - 0.01; alpha += deltaAngle)
+                for (half alpha = 0.0h * deltaAngle; alpha < TWO_PI - 0.01h; alpha += deltaAngle)
                 {
                     half2 rayDirection;
-                    half jitter = InterleavedGradientNoise(floor(input.positionCS.xy), 0);
                     sincos(alpha, rayDirection.x, rayDirection.y);
 
                     half prevOcclusionFactor = -2.0h;
@@ -237,7 +239,7 @@ Shader "Hidden/PoorGI"
                         half noff = ji * ji;
 
                         half2 offset = rayDirection * noff * _RayLength;
-                        offset = Rotate(offset, rayCountRcp * TWO_PI * (jitter - 0.5));
+                        offset = Rotate(offset, rayCountRcp * TWO_PI * (jitter2 - 0.5));
                         offset *= rayNormalizationTerm;
                         half2 rayUV = traceUV + offset;
 
@@ -261,7 +263,7 @@ Shader "Hidden/PoorGI"
                         half occlusion = step(prevOcclusionFactor, occlusionFactor);
                         prevOcclusionFactor = max(prevOcclusionFactor, occlusionFactor);
 
-                        half3 current = lingting * occlusion * rayStepsRcp * exp2(-traceDistance * 0.1);
+                        half3 current = lingting * occlusion * rayStepsRcp * exp2(-traceDistance * 0.2);
                         half lum = Luminance(current);
 
                         // SH Ligting: https://deadvoxels.blogspot.com/2009/08/has-someone-tried-this-before.html
@@ -303,7 +305,11 @@ Shader "Hidden/PoorGI"
                     half2 offset = blurDirection * i;
                     half4 color = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
                     half depth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv + offset);
-                    half weight = 1.0h / exp(10.0h * abs(centerDepth - depth));
+
+                    float r = i / _BlurSize;
+                    half diff = abs(centerDepth - depth);
+                    half weight = exp(-r * r - 4.0 * diff * diff);
+
                     result += color * weight;
                     totalWeight += weight;
                 }
@@ -337,7 +343,11 @@ Shader "Hidden/PoorGI"
                     half2 offset = blurDirection * i;
                     half4 color = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
                     half depth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv + offset);
-                    half weight = 1.0h / exp(10.0h * abs(centerDepth - depth));
+
+                    float r = i / _BlurSize;
+                    half diff = centerDepth - depth;
+                    half weight = exp(-r * r - 4.0 * diff * diff);
+
                     result += color * weight;
                     totalWeight += weight;
                 }
