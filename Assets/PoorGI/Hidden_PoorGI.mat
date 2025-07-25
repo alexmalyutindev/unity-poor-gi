@@ -27,10 +27,14 @@ Material:
         m_Texture: {fileID: 0}
         m_Scale: {x: 1, y: 1}
         m_Offset: {x: 0, y: 0}
+    - _STBN:
+        m_Texture: {fileID: 2800000, guid: 887904991c56d4742b1c746d0449af0a, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
-    - _BlurSize: 6
-    - _RayLength: 0.345
+    - _BlurSize: 5
+    - _RayLength: 0.5
     m_Colors: []
   m_BuildTextureStacks: []
   m_AllowLocking: 1
