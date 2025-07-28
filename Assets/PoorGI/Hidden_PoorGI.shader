@@ -201,6 +201,17 @@ Shader "Hidden/PoorGI"
                 );
             }
 
+            half CountBits(int bits, half count)
+            {
+                half r = 0;
+                for (int b = 0; b < count; b++)
+                {
+                    r += (bits >> b) & 1;
+                }
+
+                return r / half(count - 1.0h);
+            }
+
             Varyings FulscreenTriangleVertex(Attributes input)
             {
                 Varyings output;
@@ -221,7 +232,7 @@ Shader "Hidden/PoorGI"
                 half2 jitter = STBN(floor(input.positionCS.xy));
 
                 const half rayCount = 8.0h;
-                const half raySteps = 12.0h;
+                const half raySteps = 32.0h;
                 const half rayStepsRcp = rcp(raySteps);
                 const half rayCountRcp = rcp(rayCount);
 
@@ -229,21 +240,22 @@ Shader "Hidden/PoorGI"
                 const half2 rayNormalizationTerm = half(1.0h) / normalize(_ScreenSize.xy);
                 half2 traceUV = input.uv;
 
-                half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth - half(0.01h));
+                half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth - half(0.03h));
                 half3 viewDirectionVS = -normalize(probeVS);
 
                 half3 finalColor = half(0.0h);
                 half4 finalSH = half(0.0h);
 
                 UNITY_LOOP
-                for (half alpha = 0.0h * deltaAngle; alpha < TWO_PI - 0.01h; alpha += deltaAngle)
+                for (half alpha = 0.0h; alpha < TWO_PI - 0.01h; alpha += deltaAngle)
                 {
                     half2 rayDirection;
                     sincos(alpha, rayDirection.x, rayDirection.y);
+                    uint b_i = 0;
 
                     half prevOcclusionFactor = -2.0h;
                     UNITY_LOOP
-                    for (half stepIndex = 0.0h; stepIndex < raySteps; stepIndex++)
+                    for (half stepIndex = 0.1h; stepIndex < raySteps; stepIndex++)
                     {
                         half ji = (jitter.x + stepIndex) / (raySteps - 1.0h);
                         half noff = ji * ji;
@@ -269,16 +281,35 @@ Shader "Hidden/PoorGI"
                         half VdotR_near = dot(viewDirectionVS, rayDirectionVS);
                         half traceDistance = length(rayVS);
 
+                        #if 1
                         half occlusionFactor = VdotR_near;
                         half occlusion = step(prevOcclusionFactor, occlusionFactor);
                         prevOcclusionFactor = max(prevOcclusionFactor, occlusionFactor);
 
                         half3 current = lingting * occlusion * rayStepsRcp * exp2(-traceDistance * 0.2);
-                        half lum = Luminance(current);
+                        #else
+                        const int bitsCount = 8;
+                        half3 rayVS_far = rayPositionVS - probeVS + viewDirectionVS;
+                        half VdotR_far = dot(viewDirectionVS, normalize(rayVS_far));
+
+                        half angle_near = acos(VdotR_near);
+                        half angle_far = acos(VdotR_far);
+
+                        uint a = floor((angle_near) * INV_PI * bitsCount);
+                        uint b = ceil((angle_far - angle_near) * INV_PI * bitsCount);
+                        // uint a = floor((0.5 * VdotR_near + 0.5) * bitsCount);
+                        // uint b = ceil((0.5 * angle_far - 0.5 * VdotR_near) * bitsCount);
+
+                        uint b_j = 2 ^ b - 1 << a;
+                        // half3 current = lingting * countbits(b_j & ~b_i) / bitsCount;
+                        half3 current = lingting * CountBits(b_j & ~b_i, bitsCount);
+                        b_i = b_i | b_j;
+                        #endif
 
                         // SH Ligting: https://deadvoxels.blogspot.com/2009/08/has-someone-tried-this-before.html
                         // Half-Life 2 Shading: https://drivers.amd.com/developer/gdc/D3DTutorial10_Half-Life2_Shading.pdf
-                        finalColor += current * rayCountRcp;
+                        half lum = Luminance(current);
+                        finalColor += current;
                         finalSH += half4(kSHBasis1 * rayDirectionVS.xyz, kSHBasis0) * lum;
                     }
                 }
@@ -318,7 +349,7 @@ Shader "Hidden/PoorGI"
 
                     float r = i / _BlurSize;
                     half diff = abs(centerDepth - depth);
-                    half weight = exp(-r * r - 5.0 * diff * diff);
+                    half weight = exp(-r * r - 20.0 * diff * diff);
 
                     result += color * weight;
                     totalWeight += weight;
@@ -356,7 +387,7 @@ Shader "Hidden/PoorGI"
 
                     float r = i / _BlurSize;
                     half diff = centerDepth - depth;
-                    half weight = exp(-r * r - 5.0 * diff * diff);
+                    half weight = exp(-r * r - 20.0 * diff * diff);
 
                     result += color * weight;
                     totalWeight += weight;
