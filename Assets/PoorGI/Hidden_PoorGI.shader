@@ -208,17 +208,6 @@ Shader "Hidden/PoorGI"
                 return x >= 0 ? outVal : PI - outVal;
             }
 
-            half CountBits(int bits, half count)
-            {
-                half r = 0;
-                for (int b = 0; b < count; b++)
-                {
-                    r += (bits >> b) & 1;
-                }
-
-                return r / half(count - 1.0h);
-            }
-
             // https://graphics.stanford.edu/%7Eseander/bithacks.html
             uint bitCount(uint value) {
                 value = value - ((value >> 1u) & 0x55555555u);
@@ -264,22 +253,22 @@ Shader "Hidden/PoorGI"
                 const half2 rayNormalizationTerm = half(1.0h) / normalize(_ScreenSize.xy);
                 half2 traceUV = input.uv;
 
-                half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth - half(0.03h));
+                half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth - half(0.01h));
                 half3 viewDirectionVS = -normalize(probeVS);
 
                 half3 finalColor = half(0.0h);
                 half4 finalSH = half(0.0h);
 
                 UNITY_LOOP
-                for (half alpha = 0.1h; alpha < TWO_PI - 0.01h; alpha += deltaAngle)
+                for (half alpha = 0.0h; alpha < TWO_PI - 0.01h; alpha += deltaAngle)
                 {
                     half2 rayDirection;
                     sincos(alpha, rayDirection.x, rayDirection.y);
 
                     uint occlusion = 0u;
-                    half prevHorizon = -2.0h;
+                    half prevHorizon = 0.0h;
                     UNITY_LOOP
-                    for (half stepIndex = 1.0h; stepIndex < raySteps; stepIndex++)
+                    for (half stepIndex = 0.01h; stepIndex < raySteps; stepIndex++)
                     {
                         half ji = (jitter.x + stepIndex) / (raySteps - 1.0h);
                         half noff = ji * ji;
@@ -306,8 +295,8 @@ Shader "Hidden/PoorGI"
                         half VdotR_near = dot(viewDirectionVS, rayDirectionVS_norm);
 
                         #if 1
-                        half horizon = VdotR_near;
-                        half3 current = lingting * saturate(horizon - prevHorizon) * exp2(-rayLength * 0.2);
+                        half horizon = FastACos(-VdotR_near) * INV_PI;
+                        half3 current = lingting * clamp(horizon - prevHorizon, 0.0h, 0.5h) * exp2(-rayLength * 0.1);
                         prevHorizon = max(prevHorizon, horizon);
                         #else
                         half VdotR_far = dot(viewDirectionVS, normalize(rayDirectionVS - viewDirectionVS * 1.0h));
