@@ -33,7 +33,7 @@ Material:
         m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
-    - _BlurSize: 5
+    - _BlurSize: 6
     - _RayLength: 0.5
     m_Colors: []
   m_BuildTextureStacks: []

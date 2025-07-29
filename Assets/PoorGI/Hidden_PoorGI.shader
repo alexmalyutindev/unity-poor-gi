@@ -201,6 +201,13 @@ Shader "Hidden/PoorGI"
                 );
             }
 
+            float2 GTAOFastAcos(float2 x)
+            {
+                float2 outVal = -0.156583 * abs(x) + HALF_PI;
+                outVal *= sqrt(1.0 - abs(x));
+                return x >= 0 ? outVal : PI - outVal;
+            }
+
             half CountBits(int bits, half count)
             {
                 half r = 0;
@@ -210,6 +217,23 @@ Shader "Hidden/PoorGI"
                 }
 
                 return r / half(count - 1.0h);
+            }
+
+            // https://graphics.stanford.edu/%7Eseander/bithacks.html
+            uint bitCount(uint value) {
+                value = value - ((value >> 1u) & 0x55555555u);
+                value = (value & 0x33333333u) + ((value >> 2u) & 0x33333333u);
+                return ((value + (value >> 4u) & 0xF0F0F0Fu) * 0x1010101u) >> 24u;
+            }
+
+            // https://cdrinmatane.github.io/posts/ssaovb-code/
+            static const uint sectorCount = 32u;
+            uint updateSectors(float minHorizon, float maxHorizon, uint outBitfield) {
+                uint startBit = uint(minHorizon * float(sectorCount));
+                uint horizonAngle = uint(ceil((maxHorizon - minHorizon) * float(sectorCount)));
+                uint angleBit = horizonAngle > 0u ? uint(0xFFFFFFFFu >> (sectorCount - horizonAngle)) : 0u;
+                uint currentBitfield = angleBit << startBit;
+                return outBitfield | currentBitfield;
             }
 
             Varyings FulscreenTriangleVertex(Attributes input)
@@ -232,7 +256,7 @@ Shader "Hidden/PoorGI"
                 half2 jitter = STBN(floor(input.positionCS.xy));
 
                 const half rayCount = 8.0h;
-                const half raySteps = 32.0h;
+                const half raySteps = 8.0h;
                 const half rayStepsRcp = rcp(raySteps);
                 const half rayCountRcp = rcp(rayCount);
 
@@ -247,15 +271,15 @@ Shader "Hidden/PoorGI"
                 half4 finalSH = half(0.0h);
 
                 UNITY_LOOP
-                for (half alpha = 0.0h; alpha < TWO_PI - 0.01h; alpha += deltaAngle)
+                for (half alpha = 0.1h; alpha < TWO_PI - 0.01h; alpha += deltaAngle)
                 {
                     half2 rayDirection;
                     sincos(alpha, rayDirection.x, rayDirection.y);
-                    uint b_i = 0;
 
-                    half prevOcclusionFactor = -2.0h;
+                    uint occlusion = 0u;
+                    half prevHorizon = -2.0h;
                     UNITY_LOOP
-                    for (half stepIndex = 0.1h; stepIndex < raySteps; stepIndex++)
+                    for (half stepIndex = 1.0h; stepIndex < raySteps; stepIndex++)
                     {
                         half ji = (jitter.x + stepIndex) / (raySteps - 1.0h);
                         half noff = ji * ji;
@@ -274,43 +298,37 @@ Shader "Hidden/PoorGI"
                         // half linearDepth = SampleVarianceDepth(rayUV);
                         half3 lingting = SampleTraceLighting(rayUV);
 
-                        half3 rayPositionVS = TransformScreenUVToViewLinear(rayUV, linearDepth);
-                        half3 rayVS = rayPositionVS - probeVS;
-                        half3 rayDirectionVS = normalize(rayVS);
+                        half3 rayPositionVS_near = TransformScreenUVToViewLinear(rayUV, linearDepth);
+                        half3 rayDirectionVS = rayPositionVS_near - probeVS;
+                        half rayLength = length(rayDirectionVS);
+                        half3 rayDirectionVS_norm = rayDirectionVS / rayLength;
 
-                        half VdotR_near = dot(viewDirectionVS, rayDirectionVS);
-                        half traceDistance = length(rayVS);
+                        half VdotR_near = dot(viewDirectionVS, rayDirectionVS_norm);
 
                         #if 1
-                        half occlusionFactor = VdotR_near;
-                        half occlusion = step(prevOcclusionFactor, occlusionFactor);
-                        prevOcclusionFactor = max(prevOcclusionFactor, occlusionFactor);
-
-                        half3 current = lingting * occlusion * rayStepsRcp * exp2(-traceDistance * 0.2);
+                        half horizon = VdotR_near;
+                        half3 current = lingting * saturate(horizon - prevHorizon) * exp2(-rayLength * 0.2);
+                        prevHorizon = max(prevHorizon, horizon);
                         #else
-                        const int bitsCount = 8;
-                        half3 rayVS_far = rayPositionVS - probeVS + viewDirectionVS;
-                        half VdotR_far = dot(viewDirectionVS, normalize(rayVS_far));
+                        half VdotR_far = dot(viewDirectionVS, normalize(rayDirectionVS - viewDirectionVS * 1.0h));
 
-                        half angle_near = acos(VdotR_near);
-                        half angle_far = acos(VdotR_far);
+                        half2 frontBackHorizon;
+                        frontBackHorizon.x = VdotR_near;
+                        frontBackHorizon.y = VdotR_far;
+                        frontBackHorizon = GTAOFastAcos(frontBackHorizon) * INV_PI;
 
-                        uint a = floor((angle_near) * INV_PI * bitsCount);
-                        uint b = ceil((angle_far - angle_near) * INV_PI * bitsCount);
-                        // uint a = floor((0.5 * VdotR_near + 0.5) * bitsCount);
-                        // uint b = ceil((0.5 * angle_far - 0.5 * VdotR_near) * bitsCount);
+                        // frontBackHorizon = saturate(half2(VdotR_near, VdotR_far) * -0.5h + 0.5h);
+                        uint indirect = updateSectors(frontBackHorizon.x, frontBackHorizon.y, 0u);
 
-                        uint b_j = 2 ^ b - 1 << a;
-                        // half3 current = lingting * countbits(b_j & ~b_i) / bitsCount;
-                        half3 current = lingting * CountBits(b_j & ~b_i, bitsCount);
-                        b_i = b_i | b_j;
+                        half3 current = (1.0h - half(bitCount(indirect & ~occlusion)) / half(sectorCount)) * lingting;
+                        occlusion |= indirect;
                         #endif
 
                         // SH Ligting: https://deadvoxels.blogspot.com/2009/08/has-someone-tried-this-before.html
                         // Half-Life 2 Shading: https://drivers.amd.com/developer/gdc/D3DTutorial10_Half-Life2_Shading.pdf
                         half lum = Luminance(current);
-                        finalColor += current;
-                        finalSH += half4(kSHBasis1 * rayDirectionVS.xyz, kSHBasis0) * lum;
+                        finalColor += current * rayCountRcp;
+                        finalSH += half4(kSHBasis1 * rayDirectionVS_norm, kSHBasis0) * lum;
                     }
                 }
 
@@ -465,7 +483,7 @@ Shader "Hidden/PoorGI"
                 half3 V = -normalize(TransformScreenUVToViewLinear(center, hiLinearDepth));
                 half3 R = reflect(-V, N);
 
-                half4 weights = exp2(-10.0h * abs(hiLinearDepth - lowDepthABCD));
+                half4 weights = exp2(-20.0h * abs(hiLinearDepth - lowDepthABCD));
                 weights = saturate(weights / dot(1.0h, weights));
 
                 half4 irradianceColor = mul(weights, half4x4(colorA, colorB, colorC, colorD));
@@ -534,6 +552,29 @@ Shader "Hidden/PoorGI"
                     }
                 }
                 return varianceDepth;
+            }
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "Blit3x3"
+
+            HLSLPROGRAM
+            #pragma vertex FulscreenVertex
+            #pragma fragment Fragmet
+
+            half4 Fragmet(Varyings input) : SV_Target
+            {
+                half4 color = 0.0h;
+                for (half y = -1.0h; y < 1.1h; y++)
+                {
+                    for (half x = -1.0h; x <= 1.1h; x++)
+                    {
+                        color += SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, input.uv + half2(x, y) * _MainTex_TexelSize.xy * 4.0h, 0);
+                    }
+                }
+                
+                return color / 9.0h;
             }
             ENDHLSL
         }

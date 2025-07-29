@@ -117,6 +117,7 @@ namespace AlexMalyutin.PoorGI
                 const int BlurVerticalPass = 3;
                 const int BilateralUpsamplePass = 4;
                 const int VarianceDepthPass = 5;
+                const int BlitBlur = 6;
 
                 var cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
 
@@ -127,7 +128,7 @@ namespace AlexMalyutin.PoorGI
                 // cmd.Blit(data.CameraDepth, data.VarianceDepth, data.SSGIMaterial, VarianceDepthPass);
 
                 // Downsample Color
-                cmd.Blit(data.CameraColorTarget, data.TempTraceBuffer);
+                cmd.Blit(data.CameraColorTarget, data.TempTraceBuffer, data.SSGIMaterial, BlitBlur);
 
                 // Tracing
                 {

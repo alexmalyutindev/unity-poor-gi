@@ -13,7 +13,6 @@ Material:
   m_ModifiedSerializedProperties: 0
   m_ValidKeywords:
   - _ALPHATEST_ON
-  - _COLOROVERLAY_ON
   - _EMISSION
   - _FLIPBOOKBLENDING_ON
   m_InvalidKeywords:
@@ -81,7 +80,7 @@ Material:
     - _CameraFadingEnabled: 0
     - _CameraFarFadeDistance: 2
     - _CameraNearFadeDistance: 1
-    - _ColorMode: 3
+    - _ColorMode: 0
     - _Cull: 0
     - _Cutoff: 0.105
     - _DetailNormalMapScale: 1
@@ -114,12 +113,12 @@ Material:
     - _UVSec: 0
     - _ZWrite: 1
     m_Colors:
-    - _BaseColor: {r: 1, g: 1, b: 1, a: 1}
+    - _BaseColor: {r: 0.6886792, g: 0.2056082, b: 0.10720008, a: 1}
     - _BaseColorAddSubDiff: {r: -1, g: 0, b: 0, a: 0}
     - _CameraFadeParams: {r: 0, g: Infinity, b: 0, a: 0}
-    - _Color: {r: 1, g: 1, b: 1, a: 1}
+    - _Color: {r: 0.6886792, g: 0.2056082, b: 0.10720008, a: 1}
     - _ColorAddSubDiff: {r: 1, g: 0, b: 0, a: 0}
-    - _EmissionColor: {r: 36.75833, g: 7.6476064, b: 4.426396, a: 1}
+    - _EmissionColor: {r: 1.4980392, g: 0.53574824, b: 0, a: 1}
     - _SoftParticleFadeParams: {r: 0, g: 0, b: 0, a: 0}
   m_BuildTextureStacks: []
   m_AllowLocking: 1
