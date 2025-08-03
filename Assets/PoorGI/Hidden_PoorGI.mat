@@ -34,7 +34,7 @@ Material:
     m_Ints: []
     m_Floats:
     - _BlurSize: 6
-    - _RayLength: 0.5
+    - _RayLength: 0.8
     m_Colors: []
   m_BuildTextureStacks: []
   m_AllowLocking: 1

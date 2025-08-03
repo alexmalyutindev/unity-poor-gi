@@ -41,6 +41,7 @@ namespace AlexMalyutin.PoorGI
             public TextureHandle SHBuffer;
 
             public TextureHandle CameraColorTarget;
+            public TextureHandle GBuffer0;
 
             public Material SSGIMaterial;
             public int UpsaleType;
@@ -49,7 +50,7 @@ namespace AlexMalyutin.PoorGI
         public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
         {
             var resourceData = frameData.Get<UniversalResourceData>();
-            var universalCameraData = frameData.Get<UniversalCameraData>();
+            var cameraData = frameData.Get<UniversalCameraData>();
 
             using var builder = renderGraph.AddUnsafePass<PassData>(nameof(PoorGIPass), out var passData);
             builder.AllowPassCulling(false);
@@ -63,8 +64,8 @@ namespace AlexMalyutin.PoorGI
             passData.CameraColorTarget = resourceData.activeColorTexture;
             builder.UseTexture(passData.CameraColorTarget);
 
-            var screenWidth = universalCameraData.scaledWidth;
-            var screenHeight = universalCameraData.scaledHeight;
+            var screenWidth = cameraData.scaledWidth;
+            var screenHeight = cameraData.scaledHeight;
 
             var traceScale = 4.0f;
             // BUG: If frame buffer is not divisible by 4, border appears on right or top side of MaxDepth.
@@ -108,6 +109,8 @@ namespace AlexMalyutin.PoorGI
             giBufferDesc.name = "_Temp";
             passData.TempTraceBuffer = builder.CreateTransientTexture(giBufferDesc);
 
+            passData.GBuffer0 = resourceData.gBuffer[0];
+            builder.UseTexture(passData.GBuffer0);
 
             builder.SetRenderFunc<PassData>(static (data, context) =>
             {
@@ -158,6 +161,8 @@ namespace AlexMalyutin.PoorGI
                 cmd.SetGlobalVector("_TraceSize", new Vector4(data.TraceWidth, data.TraceHeight));
                 cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
                 cmd.SetGlobalTexture("_SHBuffer", data.SHBuffer);
+
+                cmd.SetGlobalTexture("_GBuffer0", data.GBuffer0);
                 cmd.Blit(data.GIBuffer, data.CameraColorTarget, data.SSGIMaterial, BilateralUpsamplePass);
             });
         }

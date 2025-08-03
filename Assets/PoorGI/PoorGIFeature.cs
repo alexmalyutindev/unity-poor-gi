@@ -15,7 +15,7 @@ namespace AlexMalyutin.PoorGI
         {
             _pass = new PoorGIPass(SSGIMaterial)
             {
-                renderPassEvent = RenderPassEvent.BeforeRenderingSkybox
+                renderPassEvent = RenderPassEvent.BeforeRenderingDeferredLights
             };
             _pass.ConfigureInput(
                 ScriptableRenderPassInput.Depth |
