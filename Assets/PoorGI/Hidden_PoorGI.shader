@@ -2,8 +2,15 @@ Shader "Hidden/PoorGI"
 {
     Properties
     {
+        [Toggle(USE_VISIBILITY_BITMASK)]
+        _UseVisibilityBitmask ("Use Visibility Bitmask", Float) = 1.0
+
         _MainTex("Texture", 2D) = "white" {}
-        _BlurSize("Blur Size", Range(1, 6)) = 4
+        _BlurSize("_BlurSize", Range(1, 6)) = 4
+        _RayLength("_RayLength", Range(0.1, 1.0)) = 0.5
+
+        [NonModifiableTextureData][HideInInspector]
+        _STBN("_STBN", 2D) = "black" {}
     }
 
     SubShader
@@ -25,6 +32,9 @@ Shader "Hidden/PoorGI"
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
         #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareNormalsTexture.hlsl"
         #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/GlobalSamplers.hlsl"
+
+        half4 _STBN_TexelSize;
+        Texture2D<half2> _STBN;
 
         // Funcs
         half3 TransformWorldToCameraNormal(half3 normalWS)
@@ -133,35 +143,41 @@ Shader "Hidden/PoorGI"
             #pragma vertex FulscreenTriangleVertex
             #pragma fragment Fragmet
 
+            #pragma editor_sync_compilation
+            #pragma multi_compile _ USE_VISIBILITY_BITMASK
+
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/SphericalHarmonics.hlsl"
 
+            half _RayLength;
             Texture2D<half> _TraceDepth;
+            Texture2D<half2> _VarianceDepth;
             Texture2D<half4> _TraceColor;
 
-            half GRnoise2(half2 xy)
+            half2 STBN(half2 xy)
             {
-                const half2 igr2 = half2(0.754877666, 0.56984029);
-                xy *= igr2;
-                half n = frac(xy.x + xy.y);
-                return n < 0.5 ? 2.0 * n : 2.0 - 2.0 * n;
+                return SAMPLE_TEXTURE2D_LOD(_STBN, sampler_PointRepeat, xy * _STBN_TexelSize.xy, 0);
             }
 
-            half3 SampleTraceLighting(half2 uv)
+            inline half3 SampleTraceLighting(half2 uv)
             {
-                // TODO: Blur SceneColor!
-                half3 color = SAMPLE_TEXTURE2D_LOD(_TraceColor, sampler_LinearClamp, uv, 0).rgb;
-                half luminance = Luminance(color);
-                return color * smoothstep(0.5h, 1.0h, luminance);
+                // TODO: Preprocess SceneColor!
+                return SAMPLE_TEXTURE2D_LOD(_TraceColor, sampler_LinearClamp, uv, 0).rgb;
             }
 
-            half LoadTraceDepth(uint2 coord)
+            inline half LoadLinearTraceDepth(uint2 coord)
             {
-                return LOAD_TEXTURE2D_LOD(_TraceDepth, coord, 0).r;
+                return LOAD_TEXTURE2D_LOD(_TraceDepth, coord, 0).x;
             }
 
-            half SampleTraceLinearDepth(half2 uv)
+            inline half SampleLinearTraceDepth(half2 uv)
             {
                 return SAMPLE_DEPTH_TEXTURE_LOD(_TraceDepth, sampler_PointClamp, uv, 0);
+            }
+
+            half SampleVarianceDepth(half2 uv)
+            {
+                half2 moments = SAMPLE_TEXTURE2D_LOD(_VarianceDepth, sampler_LinearClamp, uv, 0).xy;
+                return moments.x + sqrt(max(0.0, moments.y - moments.x * moments.x));
             }
 
             half3 SamplerTraceNormals(half2 uv)
@@ -177,6 +193,38 @@ Shader "Hidden/PoorGI"
                     v.x * c - v.y * s,
                     v.x * s + v.y * c
                 );
+            }
+
+            float2 GTAOFastAcos(float2 x)
+            {
+                float2 outVal = -0.156583 * abs(x) + HALF_PI;
+                outVal *= sqrt(1.0 - abs(x));
+                return x >= 0 ? outVal : PI - outVal;
+            }
+
+            //////////////////////////
+            /// BITMASK VISIBILITY ///
+            //////////////////////////
+
+            static const uint sectorCount = 32u;
+            static const half sectorCountRcp = 1.0h / half(sectorCount);
+
+            // https://graphics.stanford.edu/%7Eseander/bithacks.html
+            uint bitCount(uint value)
+            {
+                value = value - ((value >> 1u) & 0x55555555u);
+                value = (value & 0x33333333u) + ((value >> 2u) & 0x33333333u);
+                return ((value + (value >> 4u) & 0xF0F0F0Fu) * 0x1010101u) >> 24u;
+            }
+
+            // https://cdrinmatane.github.io/posts/ssaovb-code/
+            uint updateSectors(float minHorizon, float maxHorizon, uint outBitfield)
+            {
+                uint startBit = uint(minHorizon * float(sectorCount));
+                uint horizonAngle = uint(ceil((maxHorizon - minHorizon) * float(sectorCount)));
+                uint angleBit = horizonAngle > 0u ? uint(0xFFFFFFFFu >> (sectorCount - horizonAngle)) : 0u;
+                uint currentBitfield = angleBit << startBit;
+                return outBitfield | currentBitfield;
             }
 
             Varyings FulscreenTriangleVertex(Attributes input)
@@ -195,75 +243,93 @@ Shader "Hidden/PoorGI"
 
             Output Fragmet(Varyings input)
             {
-                half3 finalColor = 0.0h;
-                half4 finalSH = 0.0h;
+                half probeLinearDepth = LoadLinearTraceDepth(input.positionCS.xy);
+                half2 jitter = STBN(floor(input.positionCS.xy));
 
-                half2 traceUV = input.uv;
-
-                half probeLinearDepth = LoadTraceDepth(input.positionCS.xy);
-                half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth - 0.01h);
-
-                half3 viewDirectionVS = -normalize(probeVS);
-
-                const half rayLength = 0.25f;
                 const half rayCount = 8.0h;
                 const half raySteps = 16.0h;
-
                 const half rayStepsRcp = rcp(raySteps);
                 const half rayCountRcp = rcp(rayCount);
 
                 const half deltaAngle = TWO_PI * rayCountRcp;
-                const half2 rayNormalizationTerm = 1.0h / normalize(_ScreenSize.xy);
+                const half2 rayNormalizationTerm = half(1.0h) / normalize(_ScreenSize.xy);
+                half2 traceUV = input.uv;
+
+                half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth - half(0.01h));
+                half3 viewDirectionVS = -normalize(probeVS);
+
+                half3 finalColor = half(0.0h);
+                half4 finalSH = half(0.0h);
 
                 UNITY_LOOP
-                for (half alpha = 0.0h * deltaAngle; alpha < TWO_PI - 0.01; alpha += deltaAngle)
+                for (half alpha = 0.0h; alpha < TWO_PI - 0.01h; alpha += deltaAngle)
                 {
                     half2 rayDirection;
-                    half jitter = InterleavedGradientNoise(floor(input.positionCS.xy), 0);
                     sincos(alpha, rayDirection.x, rayDirection.y);
 
-                    half prevOcclusionFactor = -2.0h;
+                    uint occlusion = 0u;
+                    half prevHorizon = 0.0h;
                     UNITY_LOOP
                     for (half stepIndex = 0.0h; stepIndex < raySteps; stepIndex++)
                     {
-                        half ji = (jitter + stepIndex) / (raySteps - 1.0h);
-                        half noff = ji * ji; // * ji * ji;
+                        half ji = (jitter.x + stepIndex) / (raySteps - 1.0h);
+                        half noff = ji * ji;
 
-                        half2 offset = rayDirection * noff * rayLength;
-                        offset = Rotate(offset, rayCountRcp * TWO_PI * (jitter - 0.5));
+                        half2 offset = rayDirection * noff * _RayLength;
+                        offset = Rotate(offset, rayCountRcp * TWO_PI * (jitter.y - 0.5));
                         offset *= rayNormalizationTerm;
                         half2 rayUV = traceUV + offset;
 
-                        if (any(rayUV < 0.0h || rayUV > 1.0h))
-                        {
-                            break;
-                        }
+                        if (any(rayUV < 0.0h || rayUV > 1.0h)) break;
 
-                        half linearDepth = SampleTraceLinearDepth(rayUV);
+                        // TODO: Make depth pyramid for Pyramid HBAO: https://ceur-ws.org/Vol-3027/paper5.pdf
+                        half linearDepth = SampleLinearTraceDepth(rayUV);
+                        // TODO: Try out VarianceDepth sampling for more stable tracing
+                        // half linearDepth = SampleVarianceDepth(rayUV);
+
                         half3 lingting = SampleTraceLighting(rayUV);
+                        half3 currentLighting;
 
-                        half3 rayPositionVS = TransformScreenUVToViewLinear(rayUV, linearDepth);
-                        half3 rayVS = rayPositionVS - probeVS;
-                        half3 rayDirectionVS = normalize(rayVS);
-                        half VdotR = dot(viewDirectionVS, rayDirectionVS);
-                        half traceDistance = length(rayVS);
+                        half3 rayPositionVS_near = TransformScreenUVToViewLinear(rayUV, linearDepth);
+                        half3 rayDirectionVS = rayPositionVS_near - probeVS;
+                        half rayLength = length(rayDirectionVS);
+                        half3 rayDirectionVS_norm = rayDirectionVS / rayLength;
 
-                        half occlusionFactor = VdotR;
-                        half occlusion = step(prevOcclusionFactor, occlusionFactor);
-                        prevOcclusionFactor = max(prevOcclusionFactor, occlusionFactor);
+                        half VdotR_near = dot(viewDirectionVS, rayDirectionVS_norm);
+                        half thickness = 1.0h;
+                        half VdotR_far = dot(viewDirectionVS, normalize(rayDirectionVS - viewDirectionVS * thickness));
 
-                        half3 current = lingting * occlusion * rayStepsRcp * exp2(-traceDistance * 0.1);
-                        half lum = Luminance(current);
+                        #if !defined(USE_VISIBILITY_BITMASK)
+
+                        half horizon = FastACos(-VdotR_near) * INV_PI;
+                        half visibility = clamp(horizon - prevHorizon, 0.0h, 1.0f / (2.0h + stepIndex));
+                        currentLighting = lingting * visibility;
+                        prevHorizon = max(prevHorizon, horizon);
+
+                        #else
+
+                        half2 frontBackHorizon;
+                        frontBackHorizon.x = VdotR_near;
+                        frontBackHorizon.y = VdotR_far;
+                        frontBackHorizon = GTAOFastAcos(frontBackHorizon) * INV_PI;
+
+                        uint indirect = updateSectors(frontBackHorizon.x, frontBackHorizon.y, 0u);
+                        half visibility = half(bitCount(indirect & ~occlusion)) * sectorCountRcp;
+                        currentLighting = lingting * visibility;
+                        occlusion |= indirect;
+
+                        #endif
 
                         // SH Ligting: https://deadvoxels.blogspot.com/2009/08/has-someone-tried-this-before.html
                         // Half-Life 2 Shading: https://drivers.amd.com/developer/gdc/D3DTutorial10_Half-Life2_Shading.pdf
-                        finalColor += current * rayCountRcp;
-                        finalSH += half4(kSHBasis1 * rayDirectionVS.xyz, kSHBasis0) * lum;
+                        half lum = Luminance(currentLighting);
+                        finalColor += currentLighting * rayCountRcp;
+                        finalSH += half4(kSHBasis1 * rayDirectionVS_norm, kSHBasis0) * lum;
                     }
                 }
 
                 Output output;
-                output.irradianceColor = half4(LinearToSRGB(finalColor), probeLinearDepth);
+                output.irradianceColor = half4(finalColor, probeLinearDepth);
                 output.irradianceSH = finalSH;
                 return output;
             }
@@ -285,12 +351,8 @@ Shader "Hidden/PoorGI"
             half4 Fragmet(Varyings input) : SV_Target
             {
                 const half2 blurDirection = half2(_MainTex_TexelSize.x, 0.0h);
-
-                half4 centerColor = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv);
                 half centerDepth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv);
-                half centerLum = Luminance(centerColor.rgb);
 
-                // TODO: Bilateral blur
                 half4 result = 0.0h;
                 half totalWeight = 0.0h;
                 for (half i = -_BlurSize; i <= _BlurSize + 0.1h; i++)
@@ -298,10 +360,11 @@ Shader "Hidden/PoorGI"
                     half2 offset = blurDirection * i;
                     half4 color = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
                     half depth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv + offset);
-                    half lum = Luminance(color.rgb);
 
-                    // TODO: Fix gaussian weight
-                    half weight = exp(-i * i * 0.2) / exp(1.0h * abs(centerDepth - depth)); // * abs(centerLum - lum));
+                    float r = i / _BlurSize;
+                    half diff = abs(centerDepth - depth);
+                    half weight = exp(-r * r - 20.0 * diff * diff);
+
                     result += color * weight;
                     totalWeight += weight;
                 }
@@ -326,12 +389,8 @@ Shader "Hidden/PoorGI"
             half4 Fragmet(Varyings input) : SV_Target
             {
                 const half2 blurDirection = half2(0.0h, _MainTex_TexelSize.y);
-
-                half4 centerColor = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv);
                 half centerDepth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv);
-                half centerLum = Luminance(centerColor.rgb);
 
-                // TODO: Bilateral blur
                 half4 result = 0.0h;
                 half totalWeight = 0.0h;
                 for (half i = -_BlurSize; i <= _BlurSize + 0.1h; i++)
@@ -339,10 +398,11 @@ Shader "Hidden/PoorGI"
                     half2 offset = blurDirection * i;
                     half4 color = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
                     half depth = SAMPLE_DEPTH_TEXTURE(_RefrenceDepth, sampler_LinearClamp, input.uv + offset);
-                    half lum = Luminance(color.rgb);
 
-                    // TODO: Fix gaussian weight
-                    half weight = exp(-i * i * 0.5) / exp(1.0h * abs(centerDepth - depth)); // * abs(centerLum - lum));
+                    float r = i / _BlurSize;
+                    half diff = centerDepth - depth;
+                    half weight = exp(-r * r - 20.0 * diff * diff);
+
                     result += color * weight;
                     totalWeight += weight;
                 }
@@ -379,13 +439,13 @@ Shader "Hidden/PoorGI"
             }
 
             // SH0: w; SH1 xyz;
-            inline half EvaluateIrradianceSH1(half4 sh, half3 v) { return dot(sh, v); }
+            inline half EvaluateIrradianceSH1(half4 sh, half3 v) { return dot(sh.xyz, v); }
             // SH0: w; SH1 xyz;
             inline half EvaluateIrradianceSH01(half4 sh, half3 v) { return sh.w + EvaluateIrradianceSH1(sh, v); }
 
             half4 SampleGI(half2 positionCS, half hiLinearDepth)
             {
-                half2 coord = positionCS * 0.25h - 0.5h;
+                half2 coord = positionCS * 0.25h;
                 half2 texel = _MainTex_TexelSize.xy;
 
                 half2 center = coord * texel;
@@ -419,26 +479,102 @@ Shader "Hidden/PoorGI"
                 half3 V = -normalize(TransformScreenUVToViewLinear(center, hiLinearDepth));
                 half3 R = reflect(-V, N);
 
-                half4 weights = exp2(-10.0h * abs(hiLinearDepth - lowDepthABCD));
+                half4 weights = exp2(-20.0h * abs(hiLinearDepth - lowDepthABCD));
                 weights = saturate(weights / dot(1.0h, weights));
 
                 half4 irradianceColor = mul(weights, half4x4(colorA, colorB, colorC, colorD));
                 half4 SH = mul(weights, half4x4(shA, shB, shC, shD));
 
-                half irradiance = EvaluateIrradianceSH01(SH, N); // * 0.5 + 0.5;
+                half irradiance = max(0.0h, EvaluateIrradianceSH01(SH, N));
                 half reflection = pow(saturate(EvaluateIrradianceSH1(SH, R)), 5.0h);
 
                 // const half smoothness = 0.5h;
                 // half4 ligting = lerp(irradiance, reflection, smoothness) * irradianceColor;
                 half4 ligting = (irradiance + reflection) * irradianceColor;
-                return ligting;
+                return LinearToSRGB(ligting);
             }
+
+            TEXTURE2D(_GBuffer0);
 
             half4 Fragmet(Varyings input) : SV_Target
             {
+                half3 gbuffer0 = LOAD_TEXTURE2D(_GBuffer0, input.positionCS.xy);
                 half hiDepth = LoadSceneDepth(floor(input.positionCS.xy));
                 hiDepth = LinearEyeDepth(hiDepth, _ZBufferParams);
-                return SampleGI(input.positionCS.xy, hiDepth);
+                return half4(gbuffer0, 1.0h) * SampleGI(input.positionCS.xy, hiDepth);
+            }
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "VarianceDepth"
+
+            ColorMask RG
+
+            HLSLPROGRAM
+            #pragma vertex FulscreenVertex
+            #pragma fragment Fragmet
+
+            static const half Filter[4][4] =
+            {
+                1, 3, 3, 1,
+                3, 9, 9, 3,
+                3, 9, 9, 3,
+                1, 3, 3, 1
+            };
+
+            half2 Fragmet(Varyings input) : SV_Target
+            {
+                half4x4 depth;
+                int2 coord = floor(input.positionCS).xy * 4;
+
+                UNITY_UNROLL
+                for (int y = 0; y < 4; y++)
+                {
+                    UNITY_UNROLL
+                    for (int x = 0; x < 4; x++)
+                    {
+                        depth[y][x] = LOAD_TEXTURE2D_LOD(_MainTex, coord + int2(x, y), 0).x;
+                    }
+                }
+
+                half2 varianceDepth = 0.0h;
+                {
+                    for (int y = 0; y < 4; y++)
+                    {
+                        for (int x = 0; x < 4; x++)
+                        {
+                            half d = LinearEyeDepth(depth[y][x], _ZBufferParams);
+                            // TODO: Gausian veights.
+                            varianceDepth += half2(d, d * d) * Filter[y][x] / 64.0h;
+                        }
+                    }
+                }
+                return varianceDepth;
+            }
+            ENDHLSL
+        }
+        Pass
+        {
+            Name "Blit3x3"
+
+            HLSLPROGRAM
+            #pragma vertex FulscreenVertex
+            #pragma fragment Fragmet
+
+            half4 Fragmet(Varyings input) : SV_Target
+            {
+                half4 color = 0.0h;
+                for (half y = -1.0h; y < 1.1h; y++)
+                {
+                    for (half x = -1.0h; x <= 1.1h; x++)
+                    {
+                        half2 uv = input.uv + half2(x, y) * _MainTex_TexelSize.xy * 4.0h;
+                        color += SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, uv, 0);
+                    }
+                }
+
+                return color / 9.0h;
             }
             ENDHLSL
         }

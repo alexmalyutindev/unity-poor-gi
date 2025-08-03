@@ -34,12 +34,14 @@ namespace AlexMalyutin.PoorGI
             public int TraceWidth;
             public int TraceHeight;
             public TextureHandle TraceDepth;
+            public TextureHandle VarianceDepth;
 
             public TextureHandle GIBuffer;
             public TextureHandle TempTraceBuffer;
             public TextureHandle SHBuffer;
 
             public TextureHandle CameraColorTarget;
+            public TextureHandle GBuffer0;
 
             public Material SSGIMaterial;
             public int UpsaleType;
@@ -48,7 +50,7 @@ namespace AlexMalyutin.PoorGI
         public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
         {
             var resourceData = frameData.Get<UniversalResourceData>();
-            var universalCameraData = frameData.Get<UniversalCameraData>();
+            var cameraData = frameData.Get<UniversalCameraData>();
 
             using var builder = renderGraph.AddUnsafePass<PassData>(nameof(PoorGIPass), out var passData);
             builder.AllowPassCulling(false);
@@ -62,8 +64,8 @@ namespace AlexMalyutin.PoorGI
             passData.CameraColorTarget = resourceData.activeColorTexture;
             builder.UseTexture(passData.CameraColorTarget);
 
-            var screenWidth = universalCameraData.scaledWidth;
-            var screenHeight = universalCameraData.scaledHeight;
+            var screenWidth = cameraData.scaledWidth;
+            var screenHeight = cameraData.scaledHeight;
 
             var traceScale = 4.0f;
             // BUG: If frame buffer is not divisible by 4, border appears on right or top side of MaxDepth.
@@ -83,7 +85,15 @@ namespace AlexMalyutin.PoorGI
             };
             passData.TraceDepth = builder.CreateTransientTexture(traceDepthDesc);
 
-            var giBufferDesc = new TextureDesc(traceWidth, traceHeight)
+            // NOTE: Disable variance depth for now.
+            // var varianceDepthDesc = new TextureDesc(traceBufferWidth, traceBufferHeight)
+            // {
+            //     name = "_VarianceDepth",
+            //     format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.RGHalf, false),
+            // };
+            // passData.VarianceDepth = builder.CreateTransientTexture(varianceDepthDesc);
+
+            var giBufferDesc = new TextureDesc(traceBufferWidth, traceBufferHeight)
             {
                 name = "_IrradianceBuffer",
                 filterMode = FilterMode.Bilinear,
@@ -99,6 +109,8 @@ namespace AlexMalyutin.PoorGI
             giBufferDesc.name = "_Temp";
             passData.TempTraceBuffer = builder.CreateTransientTexture(giBufferDesc);
 
+            passData.GBuffer0 = resourceData.gBuffer[0];
+            builder.UseTexture(passData.GBuffer0);
 
             builder.SetRenderFunc<PassData>(static (data, context) =>
             {
@@ -107,14 +119,19 @@ namespace AlexMalyutin.PoorGI
                 const int BlurHorizontalPass = 2;
                 const int BlurVerticalPass = 3;
                 const int BilateralUpsamplePass = 4;
+                const int VarianceDepthPass = 5;
+                const int BlitBlur = 6;
 
                 var cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
 
                 // Downsample Depth
                 cmd.Blit(data.CameraDepth, data.TraceDepth, data.SSGIMaterial, DownSampleDepthPass);
+                
+                // Variance Depth
+                // cmd.Blit(data.CameraDepth, data.VarianceDepth, data.SSGIMaterial, VarianceDepthPass);
 
                 // Downsample Color
-                cmd.Blit(data.CameraColorTarget, data.TempTraceBuffer);
+                cmd.Blit(data.CameraColorTarget, data.TempTraceBuffer, data.SSGIMaterial, BlitBlur);
 
                 // Tracing
                 {
@@ -122,8 +139,10 @@ namespace AlexMalyutin.PoorGI
                     cmd.SetRenderTarget(bindings);
 
                     // TODO: Pass With MaterialPropBlock.
-                    cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
                     cmd.SetGlobalTexture("_TraceColor", data.TempTraceBuffer);
+                    cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
+                    // cmd.SetGlobalTexture("_VarianceDepth", data.VarianceDepth);
+                    
                     cmd.DrawMesh(_triangleMesh, Matrix4x4.identity, data.SSGIMaterial, 0, TracePass);
                 }
 
@@ -142,6 +161,8 @@ namespace AlexMalyutin.PoorGI
                 cmd.SetGlobalVector("_TraceSize", new Vector4(data.TraceWidth, data.TraceHeight));
                 cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
                 cmd.SetGlobalTexture("_SHBuffer", data.SHBuffer);
+
+                cmd.SetGlobalTexture("_GBuffer0", data.GBuffer0);
                 cmd.Blit(data.GIBuffer, data.CameraColorTarget, data.SSGIMaterial, BilateralUpsamplePass);
             });
         }
