@@ -302,7 +302,7 @@ Shader "Hidden/PoorGI"
                         #if !defined(USE_VISIBILITY_BITMASK)
 
                         half horizon = FastACos(-VdotR_near) * INV_PI;
-                        half visibility = clamp(horizon - prevHorizon, 0.0h, 0.5h);
+                        half visibility = clamp(horizon - prevHorizon, 0.0h, 1.0f / (2.0h + stepIndex));
                         currentLighting = lingting * visibility;
                         prevHorizon = max(prevHorizon, horizon);
 
@@ -569,8 +569,8 @@ Shader "Hidden/PoorGI"
                 {
                     for (half x = -1.0h; x <= 1.1h; x++)
                     {
-                        color += SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp,
-                                                      input.uv + half2(x, y) * _MainTex_TexelSize.xy * 4.0h, 0);
+                        half2 uv = input.uv + half2(x, y) * _MainTex_TexelSize.xy * 4.0h;
+                        color += SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, uv, 0);
                     }
                 }
 
