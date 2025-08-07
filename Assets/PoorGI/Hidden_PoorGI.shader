@@ -2,10 +2,12 @@ Shader "Hidden/PoorGI"
 {
     Properties
     {
+        [HideInInspector]
+        _MainTex("Texture", 2D) = "white" {}
+
         [Toggle(USE_VISIBILITY_BITMASK)]
         _UseVisibilityBitmask ("Use Visibility Bitmask", Float) = 1.0
 
-        _MainTex("Texture", 2D) = "white" {}
         _BlurSize("_BlurSize", Range(1, 6)) = 4
         _RayLength("_RayLength", Range(0.1, 1.0)) = 0.5
 
@@ -149,6 +151,7 @@ Shader "Hidden/PoorGI"
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/SphericalHarmonics.hlsl"
 
             half _RayLength;
+            float4 _TraceDepth_TexelSize;
             Texture2D<half> _TraceDepth;
             Texture2D<half2> _VarianceDepth;
             Texture2D<half4> _TraceColor;
@@ -245,17 +248,23 @@ Shader "Hidden/PoorGI"
             {
                 half probeLinearDepth = LoadLinearTraceDepth(input.positionCS.xy);
                 half2 jitter = STBN(floor(input.positionCS.xy));
+                // TODO: Try checker pattern, then box filter. 
+                // jitter.x = (floor(input.positionCS.x) % 2 + floor(input.positionCS.y) % 2 * 2) * 0.25h;
+
+                const half thickness = 50.0h;
+                const half probOffsetZ = 0.01h;
 
                 const half rayCount = 8.0h;
-                const half raySteps = 16.0h;
+                const half raySteps = 4.0h;
                 const half rayStepsRcp = rcp(raySteps);
                 const half rayCountRcp = rcp(rayCount);
 
                 const half deltaAngle = TWO_PI * rayCountRcp;
-                const half2 rayNormalizationTerm = half(1.0h) / normalize(_ScreenSize.xy);
-                half2 traceUV = input.uv;
+                const half2 rayNormalizationTerm = _ScreenSize.xx / _ScreenSize.xy;
 
-                half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth - half(0.01h));
+                half2 traceUV = floor(input.uv * (_TraceDepth_TexelSize.zw - 1.0f) + 0.5h) * _TraceDepth_TexelSize.xy;
+
+                half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth - probOffsetZ);
                 half3 viewDirectionVS = -normalize(probeVS);
 
                 half3 finalColor = half(0.0h);
@@ -266,16 +275,17 @@ Shader "Hidden/PoorGI"
                 {
                     half2 rayDirection;
                     sincos(alpha, rayDirection.x, rayDirection.y);
+                    rayDirection *= 0.5h * _RayLength;
 
                     uint occlusion = 0u;
                     half prevHorizon = 0.0h;
                     UNITY_LOOP
-                    for (half stepIndex = 0.0h; stepIndex < raySteps; stepIndex++)
+                    for (half stepIndex = 0.1h; stepIndex < raySteps; stepIndex++)
                     {
                         half ji = (jitter.x + stepIndex) / (raySteps - 1.0h);
                         half noff = ji * ji;
 
-                        half2 offset = rayDirection * noff * _RayLength;
+                        half2 offset = rayDirection * noff;
                         offset = Rotate(offset, rayCountRcp * TWO_PI * (jitter.y - 0.5));
                         offset *= rayNormalizationTerm;
                         half2 rayUV = traceUV + offset;
@@ -296,7 +306,6 @@ Shader "Hidden/PoorGI"
                         half3 rayDirectionVS_norm = rayDirectionVS / rayLength;
 
                         half VdotR_near = dot(viewDirectionVS, rayDirectionVS_norm);
-                        half thickness = 1.0h;
                         half VdotR_far = dot(viewDirectionVS, normalize(rayDirectionVS - viewDirectionVS * thickness));
 
                         #if !defined(USE_VISIBILITY_BITMASK)
@@ -311,7 +320,8 @@ Shader "Hidden/PoorGI"
                         half2 frontBackHorizon;
                         frontBackHorizon.x = VdotR_near;
                         frontBackHorizon.y = VdotR_far;
-                        frontBackHorizon = GTAOFastAcos(frontBackHorizon) * INV_PI;
+                        // frontBackHorizon = GTAOFastAcos(frontBackHorizon) * INV_PI;
+                        frontBackHorizon = mad(frontBackHorizon, -0.5, 0.5);
 
                         uint indirect = updateSectors(frontBackHorizon.x, frontBackHorizon.y, 0u);
                         half visibility = half(bitCount(indirect & ~occlusion)) * sectorCountRcp;
@@ -338,7 +348,7 @@ Shader "Hidden/PoorGI"
 
         Pass
         {
-            Name "BlurH"
+            Name "BilateralBlurH"
 
             Blend One Zero
 
@@ -376,7 +386,7 @@ Shader "Hidden/PoorGI"
 
         Pass
         {
-            Name "BlurV"
+            Name "BilateralBlurV"
 
             Blend One Zero
 
@@ -515,42 +525,11 @@ Shader "Hidden/PoorGI"
             #pragma vertex FulscreenVertex
             #pragma fragment Fragmet
 
-            static const half Filter[4][4] =
-            {
-                1, 3, 3, 1,
-                3, 9, 9, 3,
-                3, 9, 9, 3,
-                1, 3, 3, 1
-            };
-
             half2 Fragmet(Varyings input) : SV_Target
             {
-                half4x4 depth;
-                int2 coord = floor(input.positionCS).xy * 4;
-
-                UNITY_UNROLL
-                for (int y = 0; y < 4; y++)
-                {
-                    UNITY_UNROLL
-                    for (int x = 0; x < 4; x++)
-                    {
-                        depth[y][x] = LOAD_TEXTURE2D_LOD(_MainTex, coord + int2(x, y), 0).x;
-                    }
-                }
-
-                half2 varianceDepth = 0.0h;
-                {
-                    for (int y = 0; y < 4; y++)
-                    {
-                        for (int x = 0; x < 4; x++)
-                        {
-                            half d = LinearEyeDepth(depth[y][x], _ZBufferParams);
-                            // TODO: Gausian veights.
-                            varianceDepth += half2(d, d * d) * Filter[y][x] / 64.0h;
-                        }
-                    }
-                }
-                return varianceDepth;
+                half x = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv).x;
+                x = LinearEyeDepth(x, _ZBufferParams);
+                return half2(x, x * x);
             }
             ENDHLSL
         }
@@ -567,7 +546,7 @@ Shader "Hidden/PoorGI"
                 half4 color = 0.0h;
                 for (half y = -1.0h; y < 1.1h; y++)
                 {
-                    for (half x = -1.0h; x <= 1.1h; x++)
+                    for (half x = -1.0h; x < 1.1h; x++)
                     {
                         half2 uv = input.uv + half2(x, y) * _MainTex_TexelSize.xy * 4.0h;
                         color += SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, uv, 0);
@@ -575,6 +554,33 @@ Shader "Hidden/PoorGI"
                 }
 
                 return color / 9.0h;
+            }
+            ENDHLSL
+        }
+
+        Pass
+        {
+            Name "GaussianBlur_Variance"
+
+            ColorMask RG
+
+            HLSLPROGRAM
+            #pragma vertex FulscreenVertex
+            #pragma fragment Fragmet
+
+            half2 Fragmet(Varyings input) : SV_Target
+            {
+                // TODO: Make TwoTap version!
+                half2 variance = 0.0h;
+                for (half y = -2.0h; y < 2.1h; y++)
+                {
+                    for (half x = -2.0h; x < 2.1h; x++)
+                    {
+                        half2 uv = input.uv + half2(x, y) * _MainTex_TexelSize.xy;
+                        variance += SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, uv, 0);
+                    }
+                }
+                return variance / 25.0h;
             }
             ENDHLSL
         }

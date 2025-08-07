@@ -36,7 +36,7 @@ Material:
     m_Ints: []
     m_Floats:
     - _BlurSize: 6
-    - _RayLength: 0.8
+    - _RayLength: 1
     - _USE_VISINILITY_BITMASK: 1
     - _UseVisibilityBitmask: 1
     m_Colors: []
