@@ -8,8 +8,9 @@ Shader "Hidden/PoorGI"
         [Toggle(USE_VISIBILITY_BITMASK)]
         _UseVisibilityBitmask ("Use Visibility Bitmask", Float) = 1.0
 
-        _BlurSize("_BlurSize", Range(1, 6)) = 4
-        _RayLength("_RayLength", Range(0.1, 1.0)) = 0.5
+        _BlurSize("Bilateral Blur Size", Range(1, 6)) = 4
+        _EdgeSensitivity("Edge Sensitivity", Range(5, 50)) = 30
+        _RayLength("Ray Length", Range(0.1, 1.0)) = 0.5
 
         [NonModifiableTextureData][HideInInspector]
         _STBN("_STBN", 2D) = "black" {}
@@ -86,6 +87,7 @@ Shader "Hidden/PoorGI"
         }
 
         half _BlurSize = 4.0h;
+        half _EdgeSensitivity = 30.0h;
         half4 _MainTex_TexelSize;
         TEXTURE2D(_MainTex);
 
@@ -319,9 +321,8 @@ Shader "Hidden/PoorGI"
                         if (any(rayUV < 0.0h || rayUV > 1.0h)) break;
 
                         // TODO: Make depth pyramid for Pyramid HBAO: https://ceur-ws.org/Vol-3027/paper5.pdf
-                        half linearDepth = SampleLinearTraceDepth(rayUV);
-                        // TODO: Try out VarianceDepth sampling for more stable tracing
-                        // half linearDepth = SampleVarianceDepth(rayUV);
+                        // Use variance depth for more stable tracing, reduces firefly artifacts at edges
+                        half linearDepth = SampleVarianceDepth(rayUV);
 
                         half3 lingting = SampleTraceLighting(rayUV, stepIndexF);
                         half3 currentLighting;
@@ -400,7 +401,7 @@ Shader "Hidden/PoorGI"
 
                     float r = i / _BlurSize;
                     half diff = abs(centerDepth - depth);
-                    half weight = exp(-r * r - 20.0 * diff * diff);
+                    half weight = exp(-r * r - _EdgeSensitivity * diff * diff);
 
                     result += color * weight;
                     totalWeight += weight;
@@ -438,7 +439,7 @@ Shader "Hidden/PoorGI"
 
                     float r = i / _BlurSize;
                     half diff = abs(centerDepth - depth);
-                    half weight = exp(-r * r - 20.0 * diff * diff);
+                    half weight = exp(-r * r - _EdgeSensitivity * diff * diff);
 
                     result += color * weight;
                     totalWeight += weight;
@@ -574,13 +575,20 @@ Shader "Hidden/PoorGI"
                 const half range = 1.0h;
                 const half samplesRcp = 1.0h / ((range * 2.0h + 1.0h) * (range * 2.0h + 1.0h));
                 
+                // Weighted gaussian filter for smoother color downsampling
                 for (half y = -range; y < range + 0.1h; y++)
                 {
                     for (half x = -range; x < range + 0.1h; x++)
                     {
                         half2 offset = half2(x, y);
                         half2 uv = input.uv + offset * _MainTex_TexelSize.xy * 4.0h;
-                        color += SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, uv, 0);
+                        half4 sample = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, uv, 0);
+                        
+                        // Gaussian weight relative to center
+                        half dist2 = dot(offset, offset);
+                        half weight = exp(-dist2 * 0.5h);
+                        
+                        color += sample * weight;
                     }
                 }
 
