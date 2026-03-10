@@ -68,12 +68,11 @@ namespace AlexMalyutin.PoorGI
             var screenHeight = cameraData.scaledHeight;
 
             var traceScale = 4.0f;
-            // BUG: If frame buffer is not divisible by 4, border appears on right or top side of MaxDepth.
-            // TODO: Make bigger buffer for MaxDepth, but trace only valid pixels.
-            var traceWidth = Mathf.FloorToInt(screenWidth / traceScale);
-            var traceHeight = Mathf.FloorToInt(screenHeight / traceScale);
-            var traceBufferWidth = Mathf.CeilToInt(screenWidth / traceScale);
-            var traceBufferHeight = Mathf.CeilToInt(screenHeight / traceScale);
+            // Use CeilToInt for both dimensions to ensure proper coverage
+            var traceWidth = Mathf.CeilToInt(screenWidth / traceScale);
+            var traceHeight = Mathf.CeilToInt(screenHeight / traceScale);
+            var traceBufferWidth = traceWidth;
+            var traceBufferHeight = traceHeight;
 
             passData.TraceWidth = traceWidth;
             passData.TraceHeight = traceHeight;
@@ -81,7 +80,7 @@ namespace AlexMalyutin.PoorGI
             var traceDepthDesc = new TextureDesc(traceBufferWidth, traceBufferHeight)
             {
                 name = "_TraceDepth",
-                format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.RFloat, false),
+                format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.RGHalf, false),
             };
             passData.TraceDepth = builder.CreateTransientTexture(traceDepthDesc);
 
@@ -107,6 +106,9 @@ namespace AlexMalyutin.PoorGI
             passData.SHBuffer = builder.CreateTransientTexture(giBufferDesc);
 
             giBufferDesc.name = "_Temp";
+            giBufferDesc.useMipMap = true;
+            giBufferDesc.autoGenerateMips = false;
+            giBufferDesc.filterMode = FilterMode.Point;
             passData.TempTraceBuffer = builder.CreateTransientTexture(giBufferDesc);
 
             passData.GBuffer0 = resourceData.gBuffer[0];
@@ -133,7 +135,9 @@ namespace AlexMalyutin.PoorGI
                 cmd.Blit(data.TempTraceBuffer, data.VarianceDepth, data.SSGIMaterial, GaussianBlur_Variance);
 
                 // Downsample Color
+                // cmd.Blit(data.CameraColorTarget, data.TempTraceBuffer, data.SSGIMaterial, BlitBlur);
                 cmd.Blit(data.CameraColorTarget, data.TempTraceBuffer, data.SSGIMaterial, BlitBlur);
+                cmd.GenerateMips(data.TempTraceBuffer);
 
                 // Tracing
                 {
@@ -149,6 +153,7 @@ namespace AlexMalyutin.PoorGI
                 }
 
                 // Blur GI
+                if (true)
                 {
                     cmd.SetGlobalTexture("_RefrenceDepth", data.TraceDepth);
                     cmd.Blit(data.GIBuffer, data.TempTraceBuffer, data.SSGIMaterial, BlurHorizontalPass);
@@ -175,27 +180,32 @@ namespace AlexMalyutin.PoorGI
             var load = ArrayPool<RenderBufferLoadAction>.Shared.Rent(2);
             var store = ArrayPool<RenderBufferStoreAction>.Shared.Rent(2);
 
-            targets[0] = colorA;
-            load[0] = RenderBufferLoadAction.DontCare;
-            store[0] = RenderBufferStoreAction.Store;
-
-            targets[1] = colorB;
-            load[1] = RenderBufferLoadAction.DontCare;
-            store[1] = RenderBufferStoreAction.Store;
-
-            var bindings = new RenderTargetBinding()
+            try
             {
-                colorRenderTargets = targets[..2],
-                colorLoadActions = load[..2],
-                colorStoreActions = store[..2],
-                depthRenderTarget = colorA,
-                flags = RenderTargetFlags.None,
-            };
+                targets[0] = colorA;
+                load[0] = RenderBufferLoadAction.DontCare;
+                store[0] = RenderBufferStoreAction.Store;
 
-            ArrayPool<RenderTargetIdentifier>.Shared.Return(targets);
-            ArrayPool<RenderBufferLoadAction>.Shared.Return(load);
-            ArrayPool<RenderBufferStoreAction>.Shared.Return(store);
-            return bindings;
+                targets[1] = colorB;
+                load[1] = RenderBufferLoadAction.DontCare;
+                store[1] = RenderBufferStoreAction.Store;
+
+                var bindings = new RenderTargetBinding()
+                {
+                    colorRenderTargets = targets[..2],
+                    colorLoadActions = load[..2],
+                    colorStoreActions = store[..2],
+                    depthRenderTarget = colorA,
+                    flags = RenderTargetFlags.None,
+                };
+                return bindings;
+            }
+            finally
+            {
+                ArrayPool<RenderTargetIdentifier>.Shared.Return(targets);
+                ArrayPool<RenderBufferLoadAction>.Shared.Return(load);
+                ArrayPool<RenderBufferStoreAction>.Shared.Return(store);
+            }
         }
 
         private static void CreateFullScreenTriangle()
