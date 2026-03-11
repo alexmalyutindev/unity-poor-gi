@@ -37,12 +37,13 @@ namespace AlexMalyutin.PoorGI
             public TextureHandle VarianceDepth;
 
             public TextureHandle TempTraceBufferMips;
-            public TextureHandle TempTraceBuffer_Half;
+            public TextureHandle TempTraceBufferMips2;
+            public TextureHandle TempTraceBufferLowRes;
 
             public TextureHandle Irradiance;
             public TextureHandle SH;
-            public TextureHandle Irradiance_Half;
-            public TextureHandle SH_Half;
+            public TextureHandle IrradianceLowRes;
+            public TextureHandle SHLowRes;
 
             public TextureHandle CameraColorTarget;
             public TextureHandle GBuffer0;
@@ -72,7 +73,6 @@ namespace AlexMalyutin.PoorGI
             var screenHeight = cameraData.scaledHeight;
 
             var traceScale = 4.0f;
-            // Use CeilToInt for both dimensions to ensure proper coverage
             var traceWidth = Mathf.CeilToInt(screenWidth / traceScale);
             var traceHeight = Mathf.CeilToInt(screenHeight / traceScale);
             var traceBufferWidth = traceWidth;
@@ -110,58 +110,50 @@ namespace AlexMalyutin.PoorGI
 
             giBufferDesc.name = "_SHBuffer";
             passData.SH = builder.CreateTransientTexture(giBufferDesc);
-            
+
             // HalfRes buffers
             {
                 var desc = giBufferDesc;
                 desc.name = "_IrradianceBuffer_Half";
                 desc.width = traceBufferWidth / 2;
                 desc.height = traceBufferHeight / 2;
-                passData.Irradiance_Half = builder.CreateTransientTexture(desc);
+                passData.IrradianceLowRes = builder.CreateTransientTexture(desc);
                 desc.name = "_SHBuffer_Half";
-                passData.SH_Half = builder.CreateTransientTexture(desc);
-                
+                passData.SHLowRes = builder.CreateTransientTexture(desc);
+
                 desc.name = "_Temp_Half";
-                passData.TempTraceBuffer_Half = builder.CreateTransientTexture(desc);
+                passData.TempTraceBufferLowRes = builder.CreateTransientTexture(desc);
             }
-            
+
             giBufferDesc.name = "_Temp_Mips";
             giBufferDesc.useMipMap = true;
             giBufferDesc.autoGenerateMips = false;
             giBufferDesc.filterMode = FilterMode.Point;
             passData.TempTraceBufferMips = builder.CreateTransientTexture(giBufferDesc);
+            passData.TempTraceBufferMips2 = builder.CreateTransientTexture(giBufferDesc);
 
             passData.GBuffer0 = resourceData.gBuffer[0];
             builder.UseTexture(passData.GBuffer0);
 
             builder.SetRenderFunc<PassData>(static (data, context) =>
             {
-                const int DownSampleDepthPass = 0;
-                const int TracePass = 1;
-                const int BlurHorizontalPass = 2;
-                const int BlurVerticalPass = 3;
-                const int BilateralUpsamplePass = 4;
-                const int VarianceDepthPass = 5;
-                const int BlitBlur = 6;
-                const int GaussianBlur_Variance = 7;
-                const int BoxFilter = 8;
-
                 var cmd = CommandBufferHelpers.GetNativeCommandBuffer(context.cmd);
 
                 // Downsample Depth
                 cmd.BeginSample("Prepare Fame Buffers");
                 {
-                    cmd.Blit(data.CameraDepth, data.TraceDepth, data.SSGIMaterial, DownSampleDepthPass);
+                    cmd.Blit(data.CameraDepth, data.TraceDepth, data.SSGIMaterial, (int)Pass.DownSampleDepthPass);
                     cmd.GenerateMips(data.TraceDepth);
 
                     // Variance Depth
-                    cmd.Blit(data.CameraDepth, data.TempTraceBufferMips, data.SSGIMaterial, VarianceDepthPass);
-                    cmd.Blit(data.TempTraceBufferMips, data.VarianceDepth, data.SSGIMaterial, GaussianBlur_Variance);
+                    cmd.Blit(data.CameraDepth, data.TempTraceBufferMips, data.SSGIMaterial, (int)Pass.VarianceDepthPass);
+                    cmd.Blit(data.TempTraceBufferMips, data.VarianceDepth, data.SSGIMaterial, (int)Pass.VarianceDepthGaussianBlur);
 
                     // Downsample Color
-                    // cmd.Blit(data.CameraColorTarget, data.TempTraceBuffer, data.SSGIMaterial, BlitBlur);
-                    cmd.Blit(data.CameraColorTarget, data.TempTraceBufferMips, data.SSGIMaterial, BlitBlur);
+                    cmd.Blit(data.CameraColorTarget, data.TempTraceBufferMips, data.SSGIMaterial, (int)Pass.BlitBlur);
                     cmd.GenerateMips(data.TempTraceBufferMips);
+                    // TODO: Make blur frame color mip chain
+                    // cmd.DrawMesh();
                 }
                 cmd.EndSample("Prepare Fame Buffers");
 
@@ -175,47 +167,47 @@ namespace AlexMalyutin.PoorGI
                     cmd.SetGlobalTexture("_TraceColor", data.TempTraceBufferMips);
                     cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
                     cmd.SetGlobalTexture("_VarianceDepth", data.VarianceDepth);
-                    cmd.DrawMesh(_triangleMesh, Matrix4x4.identity, data.SSGIMaterial, 0, TracePass);
+                    DrawFullScreenTriangle(cmd, data, (int)Pass.TraceGI);
                 }
                 cmd.EndSample("Tracing");
 
                 cmd.BeginSample("Box Filter");
                 {
-                    cmd.SetRenderTarget(data.Irradiance_Half);
+                    cmd.SetRenderTarget(data.IrradianceLowRes);
                     cmd.SetGlobalTexture("_BlitTexture", data.Irradiance);
-                    cmd.DrawMesh(_triangleMesh, Matrix4x4.identity, data.SSGIMaterial, 0, BoxFilter);
+                    DrawFullScreenTriangle(cmd, data, (int)Pass.BoxFilter);
 
-                    cmd.SetRenderTarget(data.SH_Half);
+                    cmd.SetRenderTarget(data.SHLowRes);
                     cmd.SetGlobalTexture("_BlitTexture", data.SH);
-                    cmd.DrawMesh(_triangleMesh, Matrix4x4.identity, data.SSGIMaterial, 0, BoxFilter);
+                    DrawFullScreenTriangle(cmd, data, (int)Pass.BoxFilter);
                 }
                 cmd.EndSample("Box Filter");
 
                 // Blur GI
                 cmd.BeginSample("Bilateral Blur");
                 {
-                    cmd.SetGlobalTexture("_RefrenceDepth", data.TraceDepth);
-                    cmd.Blit(data.Irradiance_Half, data.TempTraceBuffer_Half, data.SSGIMaterial, BlurHorizontalPass);
-                    cmd.Blit(data.TempTraceBuffer_Half, data.Irradiance_Half, data.SSGIMaterial, BlurVerticalPass);
-
-                    cmd.Blit(data.SH_Half, data.TempTraceBuffer_Half, data.SSGIMaterial, BlurHorizontalPass);
-                    cmd.Blit(data.TempTraceBuffer_Half, data.SH_Half, data.SSGIMaterial, BlurVerticalPass);
+                    BilateralBlur(cmd, data, data.IrradianceLowRes, data.TempTraceBufferLowRes);
+                    BilateralBlur(cmd, data, data.SHLowRes, data.TempTraceBufferLowRes);
                 }
                 cmd.EndSample("Bilateral Blur");
 
                 cmd.BeginSample("Final Bilateral Upscaling");
                 {
+                    cmd.SetRenderTarget(data.CameraColorTarget);
+
                     cmd.SetGlobalInteger("_UpscaleType", data.UpsaleType);
                     cmd.SetGlobalVector("_TraceSize", new Vector4(data.TraceWidth, data.TraceHeight));
+
                     cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
-                    cmd.SetGlobalTexture("_SHBuffer", data.SH);
+                    cmd.SetGlobalTexture("_Irradiance", data.Irradiance);
+                    cmd.SetGlobalTexture("_SH", data.SH);
+
                     cmd.SetGlobalTexture("_GBuffer0", data.GBuffer0);
 
                     cmd.SetGlobalFloat("_UpscaleFactor", 1.0f / 4.0f);
-                    cmd.Blit(data.Irradiance, data.CameraColorTarget, data.SSGIMaterial, BilateralUpsamplePass);
+                    DrawFullScreenTriangle(cmd, data, (int)Pass.ResolveGI);
                 }
                 cmd.EndSample("Final Bilateral Upscaling");
-
             });
         }
 
@@ -298,6 +290,34 @@ namespace AlexMalyutin.PoorGI
         public static void CleanUp()
         {
             if (_triangleMesh) Object.DestroyImmediate(_triangleMesh);
+        }
+
+        private static void DrawFullScreenTriangle(CommandBuffer cmd, PassData data, int pass)
+        {
+            cmd.DrawMesh(_triangleMesh, Matrix4x4.identity, data.SSGIMaterial, 0, pass);
+        }
+        
+        private static void BilateralBlur(CommandBuffer cmd, PassData data, TextureHandle src, TextureHandle tmp)
+        {
+            cmd.SetGlobalTexture("_RefrenceDepthLod", 1);
+            cmd.SetGlobalTexture("_RefrenceDepth", data.TraceDepth);
+
+            cmd.SetGlobalVector("_Direction", new Vector4(1, 0));
+            cmd.Blit(src, tmp, data.SSGIMaterial, (int)Pass.BilateralBlur);
+            cmd.SetGlobalVector("_Direction", new Vector4(0, 1));
+            cmd.Blit(tmp, src, data.SSGIMaterial, (int)Pass.BilateralBlur);
+        }
+
+        enum Pass : int
+        {
+            DownSampleDepthPass,
+            TraceGI,
+            BilateralBlur,
+            ResolveGI,
+            VarianceDepthPass,
+            BlitBlur,
+            VarianceDepthGaussianBlur,
+            BoxFilter,
         }
     }
 }
