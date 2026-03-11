@@ -71,7 +71,7 @@ TextureImporter:
     buildTarget: DefaultTexturePlatform
     maxTextureSize: 128
     resizeAlgorithm: 1
-    textureFormat: 62
+    textureFormat: 19
     textureCompression: 0
     compressionQuality: 50
     crunchedCompression: 0

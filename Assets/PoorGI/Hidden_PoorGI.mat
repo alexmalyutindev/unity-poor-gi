@@ -25,6 +25,18 @@ Material:
   m_SavedProperties:
     serializedVersion: 3
     m_TexEnvs:
+    - _Bayer:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _BayerMatrix:
+        m_Texture: {fileID: 2800000, guid: f9ee4ed84c1d10c49aabb9b210b0fc44, type: 3}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
+    - _Bayermatrix:
+        m_Texture: {fileID: 0}
+        m_Scale: {x: 1, y: 1}
+        m_Offset: {x: 0, y: 0}
     - _MainTex:
         m_Texture: {fileID: 0}
         m_Scale: {x: 1, y: 1}
@@ -36,7 +48,10 @@ Material:
     m_Ints: []
     m_Floats:
     - _BlurSize: 6
+    - _EdgeSensitivity: 20
     - _RayLength: 1
+    - _RaysCount: 4
+    - _StepsCount: 8
     - _USE_VISINILITY_BITMASK: 1
     - _UseVisibilityBitmask: 1
     m_Colors: []
