@@ -128,7 +128,7 @@ namespace AlexMalyutin.PoorGI
             giBufferDesc.name = "_Temp_Mips";
             giBufferDesc.useMipMap = true;
             giBufferDesc.autoGenerateMips = false;
-            giBufferDesc.filterMode = FilterMode.Point;
+            giBufferDesc.filterMode = FilterMode.Bilinear;
             passData.TempTraceBufferMips = builder.CreateTransientTexture(giBufferDesc);
             passData.TempTraceBufferMips2 = builder.CreateTransientTexture(giBufferDesc);
 
@@ -171,23 +171,28 @@ namespace AlexMalyutin.PoorGI
                 }
                 cmd.EndSample("Tracing");
 
-                cmd.BeginSample("Box Filter");
+                if (true)
                 {
-                    cmd.SetRenderTarget(data.IrradianceLowRes);
+                    cmd.BeginSample("Box Filter");
+
+                    cmd.SetRenderTarget(data.TempTraceBufferMips);
                     cmd.SetGlobalTexture("_BlitTexture", data.Irradiance);
                     DrawFullScreenTriangle(cmd, data, (int)Pass.BoxFilter);
+                    cmd.Blit(data.TempTraceBufferMips, data.Irradiance);
 
-                    cmd.SetRenderTarget(data.SHLowRes);
+                    cmd.SetRenderTarget(data.TempTraceBufferMips);
                     cmd.SetGlobalTexture("_BlitTexture", data.SH);
                     DrawFullScreenTriangle(cmd, data, (int)Pass.BoxFilter);
+                    cmd.Blit(data.TempTraceBufferMips, data.SH);
+                
+                    cmd.EndSample("Box Filter");
                 }
-                cmd.EndSample("Box Filter");
 
                 // Blur GI
                 cmd.BeginSample("Bilateral Blur");
                 {
-                    // BilateralBlur(cmd, data, data.Irradiance, data.TempTraceBufferLowRes);
-                    // BilateralBlur(cmd, data, data.SH, data.TempTraceBufferLowRes);
+                    BilateralBlur(cmd, data, data.Irradiance, data.TempTraceBufferMips);
+                    BilateralBlur(cmd, data, data.SH, data.TempTraceBufferMips);
                 }
                 cmd.EndSample("Bilateral Blur");
 
