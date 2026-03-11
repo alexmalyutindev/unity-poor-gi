@@ -216,9 +216,9 @@ Shader "Hidden/PoorGI"
                 return LOAD_TEXTURE2D_LOD(_TraceDepth, coord, 0).x;
             }
 
-            inline half SampleLinearTraceDepth(half2 uv)
+            inline half SampleLinearTraceDepth(half2 uv, uint lod = 0)
             {
-                return SAMPLE_DEPTH_TEXTURE_LOD(_TraceDepth, sampler_LinearClamp, uv, 0);
+                return SAMPLE_DEPTH_TEXTURE_LOD(_TraceDepth, sampler_LinearClamp, uv, lod);
             }
 
             half SampleVarianceDepth(half2 uv)
@@ -303,8 +303,8 @@ Shader "Hidden/PoorGI"
                 // const float4 angleOffset = half4(0, 0.5, 0.25, 0.75) + 0.125f;
                 // jitter.x = angleOffset[2* (coords.x % 2) + (coords.y % 2)];
                 // jitter.y = angleOffset[tileCoord.x % 2 + 2 * (tileCoord.y % 2)];
-                jitter.y = LOAD_TEXTURE2D(_BayerMatrix, tileCoord % 4).a;
-                // jitter.y = InterleavedGradientNoise(tileCoord, 0);
+                // jitter.y = LOAD_TEXTURE2D(_BayerMatrix, tileCoord % 4).a;
+                jitter.y = InterleavedGradientNoise(tileCoord, 0);
 
                 // uint tileIndex = tileCoord.x + tileCoord.y * 4;
                 // float baseAngle = float(tileIndex) / 16.0;   
@@ -337,7 +337,7 @@ Shader "Hidden/PoorGI"
                     UNITY_LOOP
                     for (half stepIndexF = 0.0h; stepIndexF < raySteps; stepIndexF++, stepIndexI++)
                     {
-                        half ji = (jitter.x + max(0.1f, stepIndexF)) * rayStepsRcp;
+                        half ji = (jitter.x + max(0.0f, stepIndexF)) * rayStepsRcp;
                         half noff = ji * ji;
 
                         half2 offset = rayDirection * noff;
@@ -352,10 +352,11 @@ Shader "Hidden/PoorGI"
 
                         // TODO: Make depth pyramid for Pyramid HBAO: https://ceur-ws.org/Vol-3027/paper5.pdf
                         // Use variance depth for more stable tracing, reduces firefly artifacts at edges
-                        half linearDepth = SampleVarianceDepth(rayUV);
+                        // half linearDepth = SampleVarianceDepth(rayUV);
+                        half linearDepth = SampleLinearTraceDepth(rayUV, floor(length(offset) * 8.0h));
 
                         // TODO: Generate blured frame color buffer mip chain!
-                        half3 lingting = SampleTraceLighting(rayUV, dot(offset, offset) * 6);
+                        half3 lingting = SampleTraceLighting(rayUV, floor(length(offset) * 8.0h));
                         half3 currentLighting;
 
                         half3 rayPositionVS_near = TransformScreenUVToViewLinear(rayUV, linearDepth);
@@ -390,7 +391,7 @@ Shader "Hidden/PoorGI"
                         // SH Ligting: https://deadvoxels.blogspot.com/2009/08/has-someone-tried-this-before.html
                         // Half-Life 2 Shading: https://drivers.amd.com/developer/gdc/D3DTutorial10_Half-Life2_Shading.pdf
                         half lum = Luminance(currentLighting);
-                        finalColor += currentLighting * rayCountRcp * rayStepsRcp * 8.0h;
+                        finalColor += currentLighting * rayCountRcp;
                         finalSH += half4(kSHBasis1 * rayDirectionVS_norm, kSHBasis0) * lum;
                     }
                 }
@@ -419,18 +420,19 @@ Shader "Hidden/PoorGI"
 
             half4 Fragmet(Varyings input) : SV_Target
             {
+                half steps = floor(_BlurSize);
                 const half2 blurDirection = _MainTex_TexelSize.xy * _Direction;
                 half centerDepth = SAMPLE_DEPTH_TEXTURE_LOD(_RefrenceDepth, sampler_LinearClamp, input.uv, _RefrenceDepthLod);
 
                 half4 result = 0.0h;
                 half totalWeight = 0.0h;
-                for (half i = -_BlurSize; i <= _BlurSize + 0.1h; i++)
+                for (half i = -steps; i <= steps + 0.1h; i++)
                 {
                     half2 offset = blurDirection * i;
                     half4 color = SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, input.uv + offset);
                     half depth = SAMPLE_DEPTH_TEXTURE_LOD(_RefrenceDepth, sampler_LinearClamp, input.uv + offset, _RefrenceDepthLod);
 
-                    float r = i / _BlurSize;
+                    float r = i / steps;
                     half diff = abs(centerDepth - depth);
                     half weight = exp(-r * r - _EdgeSensitivity * diff * diff);
 
@@ -533,6 +535,7 @@ Shader "Hidden/PoorGI"
 
             half4 Fragmet(Varyings input) : SV_Target
             {
+                return LinearToSRGB(SAMPLE_TEXTURE2D(_Irradiance, sampler_PointClamp, input.uv));
                 half3 gbuffer0 = LOAD_TEXTURE2D(_GBuffer0, input.positionCS.xy);
                 half hiDepth = LoadSceneDepth(floor(input.positionCS.xy));
                 hiDepth = LinearEyeDepth(hiDepth, _ZBufferParams);

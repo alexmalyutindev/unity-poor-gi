@@ -186,8 +186,8 @@ namespace AlexMalyutin.PoorGI
                 // Blur GI
                 cmd.BeginSample("Bilateral Blur");
                 {
-                    BilateralBlur(cmd, data, data.IrradianceLowRes, data.TempTraceBufferLowRes);
-                    BilateralBlur(cmd, data, data.SHLowRes, data.TempTraceBufferLowRes);
+                    // BilateralBlur(cmd, data, data.Irradiance, data.TempTraceBufferLowRes);
+                    // BilateralBlur(cmd, data, data.SH, data.TempTraceBufferLowRes);
                 }
                 cmd.EndSample("Bilateral Blur");
 
@@ -299,7 +299,7 @@ namespace AlexMalyutin.PoorGI
         
         private static void BilateralBlur(CommandBuffer cmd, PassData data, TextureHandle src, TextureHandle tmp)
         {
-            cmd.SetGlobalTexture("_RefrenceDepthLod", 1);
+            cmd.SetGlobalTexture("_RefrenceDepthLod", 0);
             cmd.SetGlobalTexture("_RefrenceDepth", data.TraceDepth);
 
             cmd.SetGlobalVector("_Direction", new Vector4(1, 0));
