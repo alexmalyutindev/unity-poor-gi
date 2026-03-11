@@ -497,22 +497,22 @@ Shader "Hidden/PoorGI"
                 uv23.xy = center + half2(0.0h, texel.y);
                 uv23.zw = center - half2(0.0h, texel.y);
 
-                // TODO: Keep depth in _GIBuffer.a to reduce sampling.
+                // TODO: Put depth in _Irradiance.a channel to reduce sampling.
                 half4 lowDepthABCD;
-                lowDepthABCD.x = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, uv01.xy, 0);
-                lowDepthABCD.y = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, uv01.zw, 0);
-                lowDepthABCD.z = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, uv23.xy, 0);
-                lowDepthABCD.w = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, uv23.zw, 0);
+                lowDepthABCD.x = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_PointClamp, uv01.xy, 0);
+                lowDepthABCD.y = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_PointClamp, uv01.zw, 0);
+                lowDepthABCD.z = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_PointClamp, uv23.xy, 0);
+                lowDepthABCD.w = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_PointClamp, uv23.zw, 0);
 
-                half4 colorA = SAMPLE_TEXTURE2D_LOD(_Irradiance, sampler_LinearClamp, uv01.xy, 0);
-                half4 colorB = SAMPLE_TEXTURE2D_LOD(_Irradiance, sampler_LinearClamp, uv01.zw, 0);
-                half4 colorC = SAMPLE_TEXTURE2D_LOD(_Irradiance, sampler_LinearClamp, uv23.xy, 0);
-                half4 colorD = SAMPLE_TEXTURE2D_LOD(_Irradiance, sampler_LinearClamp, uv23.zw, 0);
+                half4 colorA = SAMPLE_TEXTURE2D_LOD(_Irradiance, sampler_PointClamp, uv01.xy, 0);
+                half4 colorB = SAMPLE_TEXTURE2D_LOD(_Irradiance, sampler_PointClamp, uv01.zw, 0);
+                half4 colorC = SAMPLE_TEXTURE2D_LOD(_Irradiance, sampler_PointClamp, uv23.xy, 0);
+                half4 colorD = SAMPLE_TEXTURE2D_LOD(_Irradiance, sampler_PointClamp, uv23.zw, 0);
 
-                half4 shA = SAMPLE_TEXTURE2D_LOD(_SH, sampler_LinearClamp, uv01.xy, 0);
-                half4 shB = SAMPLE_TEXTURE2D_LOD(_SH, sampler_LinearClamp, uv01.zw, 0);
-                half4 shC = SAMPLE_TEXTURE2D_LOD(_SH, sampler_LinearClamp, uv23.xy, 0);
-                half4 shD = SAMPLE_TEXTURE2D_LOD(_SH, sampler_LinearClamp, uv23.zw, 0);
+                half4 shA = SAMPLE_TEXTURE2D_LOD(_SH, sampler_PointClamp, uv01.xy, 0);
+                half4 shB = SAMPLE_TEXTURE2D_LOD(_SH, sampler_PointClamp, uv01.zw, 0);
+                half4 shC = SAMPLE_TEXTURE2D_LOD(_SH, sampler_PointClamp, uv23.xy, 0);
+                half4 shD = SAMPLE_TEXTURE2D_LOD(_SH, sampler_PointClamp, uv23.zw, 0);
 
                 half3 N = TransformWorldToCameraNormal(normalWS);
                 half3 V = -normalize(TransformScreenUVToViewLinear(center, hiLinearDepth));
@@ -535,11 +535,11 @@ Shader "Hidden/PoorGI"
 
             half4 Fragmet(Varyings input) : SV_Target
             {
-                return LinearToSRGB(SAMPLE_TEXTURE2D(_Irradiance, sampler_PointClamp, input.uv));
+                // return LinearToSRGB(SAMPLE_TEXTURE2D(_Irradiance, sampler_PointClamp, input.uv));
                 half3 gbuffer0 = LOAD_TEXTURE2D(_GBuffer0, input.positionCS.xy);
                 half hiDepth = LoadSceneDepth(floor(input.positionCS.xy));
                 hiDepth = LinearEyeDepth(hiDepth, _ZBufferParams);
-                return half4(gbuffer0, 1.0h) * SampleGI(input.positionCS.xy, hiDepth);
+                return half4(gbuffer0, 1.0h) * SampleGI(input.positionCS.xy, hiDepth) * 2;
             }
             ENDHLSL
         }
@@ -572,7 +572,7 @@ Shader "Hidden/PoorGI"
             half4 Fragmet(Varyings input) : SV_Target
             {
                 half4 color = 0.0h;
-                const half range = 1.0h;
+                const half range = 3.0h;
                 const half samplesRcp = 1.0h / ((range * 2.0h + 1.0h) * (range * 2.0h + 1.0h));
                 
                 // Weighted gaussian filter for smoother color downsampling

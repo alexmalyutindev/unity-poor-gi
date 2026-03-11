@@ -47,11 +47,11 @@ Material:
         m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
-    - _BlurSize: 6
+    - _BlurSize: 1
     - _EdgeSensitivity: 20
     - _RayLength: 1
     - _RaysCount: 4
-    - _StepsCount: 8
+    - _StepsCount: 16
     - _USE_VISINILITY_BITMASK: 1
     - _UseVisibilityBitmask: 1
     m_Colors: []
