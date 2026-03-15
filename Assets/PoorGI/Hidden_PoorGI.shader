@@ -13,6 +13,7 @@ Shader "Hidden/PoorGI"
         _RayLength("Ray Length", Range(0.1, 1.0)) = 0.5
         _RaysCount("Rays Count", Range(2, 16)) = 4
         _StepsCount("Steps Count", Range(2, 16)) = 4
+        _MipLevelFactor("MipLevel Factor", Range(1, 32)) = 8.0
 
         [NonModifiableTextureData][HideInInspector]
         _STBN("_STBN", 2D) = "black" {}
@@ -92,6 +93,7 @@ Shader "Hidden/PoorGI"
             return positionVS.xyz;
         }
 
+        int _MipLevelFactor;
         half _BlurSize = 4.0h;
         half _EdgeSensitivity = 30.0h;
         half4 _MainTex_TexelSize;
@@ -174,66 +176,73 @@ Shader "Hidden/PoorGI"
                 normalVS *= sign(-normalVS.z);
                 return normalVS;
             }
+            
+            // #define _2X2_BLUR_DEPTH
 
             half4 Fragmet(Varyings input) : SV_Target
             {
-                int2 baseCoord = (int2)floor(input.positionCS.xy) * 4;
-                
-                // NOTE: 4x4 depth downsampling.
-                half4x4 depth4x4;
-                UNITY_UNROLL for (int y = 0; y < 4; y++)
+                #ifdef _4X4_BLUR_DEPTH
                 {
-                    UNITY_UNROLL for (int x = 0; x < 4; x++)
+                    int2 baseCoord = (int2)floor(input.positionCS.xy) * 4;
+
+                    // NOTE: 4x4 depth downsampling.
+                    half4x4 depth4x4;
+                    UNITY_UNROLL for (int y = 0; y < 4; y++)
                     {
-                        depth4x4[x][y] = LOAD_TEXTURE2D_LOD(_MainTex, baseCoord + uint2(x, y), 0);
+                        UNITY_UNROLL for (int x = 0; x < 4; x++)
+                        {
+                            depth4x4[x][y] = LOAD_TEXTURE2D_LOD(_MainTex, baseCoord + uint2(x, y), 0);
+                        }
                     }
-                }
 
-                UNITY_UNROLL for (int i = 0; i < 4; i++)
+                    UNITY_UNROLL for (int i = 0; i < 4; i++) depth4x4[i] = LinearEyeDepth(depth4x4[i], _ZBufferParams);
+
+                    half3 normalVS = ReconstructNormals(baseCoord, depth4x4);
+
+                    half finalDepth = dot(0.25h * 0.25h, depth4x4[0] + depth4x4[1] + depth4x4[2] + depth4x4[3]);
+                    half4(finalDepth, normalVS.xy, 0.0h);
+                }
+                #elifdef _2X2_BLUR_DEPTH
                 {
-                    depth4x4[i] = LinearEyeDepth(depth4x4[i], _ZBufferParams);
+                    // NOTE: 2x2 depth downsampling.
+                    float4 offset = float4(-_MainTex_TexelSize.xy, _MainTex_TexelSize.xy) * 0.5f;
+                    half4 depth2x2 = 0.0h;
+                    depth2x2.x = SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv + offset.xy, 0);
+                    depth2x2.y = SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv + offset.xw, 0);
+                    depth2x2.z = SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv + offset.zy, 0);
+                    depth2x2.w = SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv + offset.zw, 0);
+                    return dot(LinearEyeDepth(depth2x2, _ZBufferParams), 0.25h);
                 }
+                #elifdef _4X4_MINMAX_DEPTH
+                {
+                    half2 depth = half2(UNITY_RAW_FAR_CLIP_VALUE, UNITY_NEAR_CLIP_VALUE);
+                    int2 coord = floor(input.positionCS.xy) * 4;
 
-                half3 normalVS = ReconstructNormals(baseCoord, depth4x4);
+                    UNITY_LOOP
+                    for (int y = 0; y < 4; y++)
+                    {
+                        UNITY_LOOP
+                        for (int x = 0; x < 4; x++)
+                        {
+                            half d = LOAD_TEXTURE2D_LOD(_MainTex, coord + int2(x, y), 0).x;
+                            #if UNITY_REVERSED_Z
+                            depth.x = max(depth.x, d);
+                            depth.y = min(depth.y, d);
+                            #else
+                            depth.x = min(depth.x, d);
+                            depth.y = max(depth.y, d);
+                            #endif
+                        }
+                    }
 
-                half finalDepth = dot(0.25h * 0.25h, depth4x4[0] + depth4x4[1] + depth4x4[2] + depth4x4[3]);
-                // return finalDepth; // half4(finalDepth, normalVS.xy, 0.0h);
-
-                // NOTE: 2x2 depth downsampling.
-                float4 offset = float4(-_MainTex_TexelSize.xy, _MainTex_TexelSize.xy) * 0.5f;
-                half4 depth2x2 = 0.0h;
-                depth2x2.x = SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv + offset.xy, 0);
-                depth2x2.y = SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv + offset.xw, 0);
-                depth2x2.z = SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv + offset.zy, 0);
-                depth2x2.w = SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv + offset.zw, 0);
-                return dot(LinearEyeDepth(depth2x2, _ZBufferParams), 0.25h);
-
+                    return half4(LinearEyeDepth(depth, _ZBufferParams), 0.0, 0.0);
+                }
+                #else
                 return LinearEyeDepth(
                     SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv, 0),
                     _ZBufferParams
                 );
-
-                half2 depth = half2(UNITY_RAW_FAR_CLIP_VALUE, UNITY_NEAR_CLIP_VALUE);
-                int2 coord = floor(input.positionCS.xy) * 4;
-
-                UNITY_LOOP
-                for (int y = 0; y < 4; y++)
-                {
-                    UNITY_LOOP
-                    for (int x = 0; x < 4; x++)
-                    {
-                        half d = LOAD_TEXTURE2D_LOD(_MainTex, coord + int2(x, y), 0).x;
-                        #if UNITY_REVERSED_Z
-                        depth.x = max(depth.x, d);
-                        depth.y = min(depth.y, d);
-                        #else
-                        depth.x = min(depth.x, d);
-                        depth.y = max(depth.y, d);
-                        #endif
-                    }
-                }
-
-                return half4(LinearEyeDepth(depth, _ZBufferParams), 0.0, 0.0);
+                #endif
             }
             ENDHLSL
         }
@@ -357,7 +366,8 @@ Shader "Hidden/PoorGI"
 
                 // NOTE: Hacky noise, STBN for step jitter, and regular pattern for angle jitter. 
                 half2 jitter = 0.0h;
-                // jitter.y = LOAD_TEXTURE2D(_BayerMatrix, coords % 4).a;
+                jitter.y = LOAD_TEXTURE2D(_BayerMatrix, tileCoord % 4).a;
+                jitter.x = LOAD_TEXTURE2D(_BayerMatrix, (tileCoord + 1) % 4).a;
                 // const float dispersion = 2.0f;
                 // const float rcp_dispersion2 = rcp(dispersion * dispersion);
                 // jitter.y = ((coords.x % dispersion) + dispersion * ((coords.y % dispersion)) + 0.5h) * rcp_dispersion2;
@@ -368,8 +378,9 @@ Shader "Hidden/PoorGI"
                 // jitter.y = LOAD_TEXTURE2D(_BayerMatrix, tileCoord % 4).a;
                 
                 // jitter.y = InterleavedGradientNoise(tileCoord, 0);
-                jitter.x = (tileCoord.y % 4 + tileCoord.x % 4 * 4) * 0.25h * 0.25h;
-                jitter.y = (tileCoord.x % 4 + tileCoord.y % 4 * 4) * 0.25h * 0.25h;
+                
+                // jitter.x = (tileCoord.y % 4 + tileCoord.x % 4 * 4) * 0.25h * 0.25h;
+                // jitter.y = (tileCoord.x % 4 + tileCoord.y % 4 * 4) * 0.25h * 0.25h;
 
                 // uint tileIndex = tileCoord.x + tileCoord.y * 4;
                 // float baseAngle = float(tileIndex) / 16.0;   
@@ -385,7 +396,7 @@ Shader "Hidden/PoorGI"
 
                 // NOTE: Probe depth offseting.
                 // probeLinearDepth -= probeLinearDepth * probOffsetZ;
-                half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth);
+                half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth - 0.01h);
                 half3 viewDirectionVS = -normalize(probeVS);
 
                 half3 finalColor = half(0.0h);
@@ -408,6 +419,8 @@ Shader "Hidden/PoorGI"
                         half noff = ji * ji;
 
                         half2 offset = rayDirection * noff;
+                        int mipLevel = min(4, floor(length(offset * 2.0f) * _MipLevelFactor));
+                        
                         // Mix step-dependent rotation with base jitter for per-step variation
                         // half stepRotation = rayCountRcp * TWO_PI * (jitter.y - 0.5) + stepIndexF * rayCountRcp * PI;
                         half stepRotation = rayCountRcp * TWO_PI * (jitter.y - 0.5h);
@@ -422,11 +435,11 @@ Shader "Hidden/PoorGI"
                         // half linearDepth = SampleVarianceDepth(rayUV);
 
                         // half linearDepth = SampleLinearTraceDepth(rayUV, floor(length(offset) * 8.0h));
-                        half4 depthNormal = SAMPLE_TEXTURE2D(_TraceDepth, sampler_LinearClamp, rayUV);
+                        half4 depthNormal = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, rayUV, 0);
                         half linearDepth = depthNormal.x;
 
                         // TODO: Generate blured frame color buffer mip chain!
-                        half3 lingting = SampleTraceLighting(rayUV, floor(length(offset) * 8.0h));
+                        half3 lingting = SampleTraceLighting(rayUV, mipLevel);
                         half3 currentLighting;
 
                         half3 rayPositionVS_near = TransformScreenUVToViewLinear(rayUV, linearDepth);
