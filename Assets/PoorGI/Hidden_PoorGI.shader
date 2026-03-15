@@ -56,13 +56,11 @@ Shader "Hidden/PoorGI"
         {
             return 1.0 / (zBufferParam.z * depth + zBufferParam.w);
         }
-
-        // Z buffer to linear view space (eye) depth.
-        // Does NOT correctly handle oblique view frustums.
-        // Does NOT work with orthographic projection.
-        // zBufferParam (UNITY_REVERSED_Z) = { f/n - 1,   1, (1/n - 1/f), 1/f }
-        // zBufferParam                    = { 1 - f/n, f/n, (1/f - 1/n), 1/n }
         half2 LinearEyeDepth(half2 depth, half4 zBufferParam)
+        {
+            return 1.0 / (zBufferParam.z * depth + zBufferParam.w);
+        }
+        half4 LinearEyeDepth(half4 depth, half4 zBufferParam)
         {
             return 1.0 / (zBufferParam.z * depth + zBufferParam.w);
         }
@@ -138,14 +136,78 @@ Shader "Hidden/PoorGI"
             Name "0 DownSampleDepthX4"
 
             Blend One Zero
-            ColorMask RG
+            ColorMask RGB
 
             HLSLPROGRAM
             #pragma vertex FulscreenVertex
             #pragma fragment Fragmet
 
-            half2 Fragmet(Varyings input) : SV_Target
+            half Average(half4x4 value) { return dot(0.25h, value[0] + value[1] + value[2] + value[3]); }
+
+            half3 ReconstructNormals(uint2 baseCoord, half4x4 depth4x4)
             {
+                float dZdx = 0.0;
+                float dZdy = 0.0;
+
+                UNITY_UNROLL for (int y = 0; y < 4; y++)
+                    UNITY_UNROLL for (int x = 0; x < 4; x++)
+                    {
+                        float wx = (float)x - 1.5;
+                        float wy = (float)y - 1.5;
+                        dZdx += depth4x4[x][y] * wx;
+                        dZdy += depth4x4[x][y] * wy;
+                    }
+
+                // Σ w² = 5 per column/row × 4 = 20
+                dZdx /= 20.0;
+                dZdy /= 20.0;
+
+                // Reconstruct the centre view-space position
+                float2 uvCenter = (float2(baseCoord) + 2.0) * _MainTex_TexelSize.xy; // +2 = centre of 4x4
+                float3 posC = TransformScreenUVToViewLinear(uvCenter, Average(depth4x4));
+
+                // Build tangent vectors: step one texel in X or Y, displace Z by the fitted gradient
+                float3 posR = TransformScreenUVToViewLinear(uvCenter + float2(_MainTex_TexelSize.x, 0), posC.z + dZdx);
+                float3 posU = TransformScreenUVToViewLinear(uvCenter + float2(0, _MainTex_TexelSize.y), posC.z + dZdy);
+
+                half3 normalVS = (half3)normalize(cross(posR - posC, posU - posC));
+                normalVS *= sign(-normalVS.z);
+                return normalVS;
+            }
+
+            half4 Fragmet(Varyings input) : SV_Target
+            {
+                int2 baseCoord = (int2)floor(input.positionCS.xy) * 4;
+                
+                // NOTE: 4x4 depth downsampling.
+                half4x4 depth4x4;
+                UNITY_UNROLL for (int y = 0; y < 4; y++)
+                {
+                    UNITY_UNROLL for (int x = 0; x < 4; x++)
+                    {
+                        depth4x4[x][y] = LOAD_TEXTURE2D_LOD(_MainTex, baseCoord + uint2(x, y), 0);
+                    }
+                }
+
+                UNITY_UNROLL for (int i = 0; i < 4; i++)
+                {
+                    depth4x4[i] = LinearEyeDepth(depth4x4[i], _ZBufferParams);
+                }
+
+                half3 normalVS = ReconstructNormals(baseCoord, depth4x4);
+
+                half finalDepth = dot(0.25h * 0.25h, depth4x4[0] + depth4x4[1] + depth4x4[2] + depth4x4[3]);
+                // return finalDepth; // half4(finalDepth, normalVS.xy, 0.0h);
+
+                // NOTE: 2x2 depth downsampling.
+                float4 offset = float4(-_MainTex_TexelSize.xy, _MainTex_TexelSize.xy) * 0.5f;
+                half4 depth2x2 = 0.0h;
+                depth2x2.x = SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv + offset.xy, 0);
+                depth2x2.y = SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv + offset.xw, 0);
+                depth2x2.z = SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv + offset.zy, 0);
+                depth2x2.w = SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv + offset.zw, 0);
+                return dot(LinearEyeDepth(depth2x2, _ZBufferParams), 0.25h);
+
                 return LinearEyeDepth(
                     SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv, 0),
                     _ZBufferParams
@@ -171,7 +233,7 @@ Shader "Hidden/PoorGI"
                     }
                 }
 
-                return LinearEyeDepth(depth, _ZBufferParams);
+                return half4(LinearEyeDepth(depth, _ZBufferParams), 0.0, 0.0);
             }
             ENDHLSL
         }
@@ -194,7 +256,7 @@ Shader "Hidden/PoorGI"
 
             half _RayLength;
             float4 _TraceDepth_TexelSize;
-            Texture2D<half> _TraceDepth;
+            Texture2D<half4> _TraceDepth;
             Texture2D<half2> _VarianceDepth;
             Texture2D<half4> _TraceColor;
             SamplerState sampler_TraceColor;
@@ -358,7 +420,10 @@ Shader "Hidden/PoorGI"
                         // TODO: Make depth pyramid for Pyramid HBAO: https://ceur-ws.org/Vol-3027/paper5.pdf
                         // Use variance depth for more stable tracing, reduces firefly artifacts at edges
                         // half linearDepth = SampleVarianceDepth(rayUV);
-                        half linearDepth = SampleLinearTraceDepth(rayUV, floor(length(offset) * 8.0h));
+
+                        // half linearDepth = SampleLinearTraceDepth(rayUV, floor(length(offset) * 8.0h));
+                        half4 depthNormal = SAMPLE_TEXTURE2D(_TraceDepth, sampler_LinearClamp, rayUV);
+                        half linearDepth = depthNormal.x;
 
                         // TODO: Generate blured frame color buffer mip chain!
                         half3 lingting = SampleTraceLighting(rayUV, floor(length(offset) * 8.0h));
@@ -489,7 +554,7 @@ Shader "Hidden/PoorGI"
 
             half4 SampleGI(half2 positionCS, half hiLinearDepth)
             {
-                half2 coord = positionCS * _UpscaleFactor;
+                half2 coord = positionCS / 4;
                 half2 texel = _Irradiance_TexelSize.xy;
 
                 half2 center = coord * texel;
@@ -504,10 +569,10 @@ Shader "Hidden/PoorGI"
 
                 // TODO: Put depth in _Irradiance.a channel to reduce sampling.
                 half4 lowDepthABCD;
-                lowDepthABCD.x = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, uv01.xy, 0);
-                lowDepthABCD.y = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, uv01.zw, 0);
-                lowDepthABCD.z = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, uv23.xy, 0);
-                lowDepthABCD.w = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, uv23.zw, 0);
+                lowDepthABCD.x = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, uv01.xy, 0).x;
+                lowDepthABCD.y = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, uv01.zw, 0).x;
+                lowDepthABCD.z = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, uv23.xy, 0).x;
+                lowDepthABCD.w = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, uv23.zw, 0).x;
 
                 half4 colorA = SAMPLE_TEXTURE2D_LOD(_Irradiance, sampler_LinearClamp, uv01.xy, 0);
                 half4 colorB = SAMPLE_TEXTURE2D_LOD(_Irradiance, sampler_LinearClamp, uv01.zw, 0);
@@ -642,30 +707,25 @@ Shader "Hidden/PoorGI"
         Pass
         {
             Name "7 BoxFilter 4x4"
-            Cull Back
+            Cull Front
             HLSLPROGRAM
-            #pragma vertex FulscreenTriangleVertex
+            #pragma vertex FulscreenVertex
             #pragma fragment Fragmet
-            TEXTURE2D(_BlitTexture);
-            float4 _BlitTexture_TexelSize;
             float2 _Direction;
-            half4 SampleLinear(float2 uv){ return SAMPLE_TEXTURE2D(_BlitTexture, sampler_LinearClamp, uv); }
+            half4 SampleLinear(float2 uv){ return SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, uv); }
             half4 Fragmet(Varyings input) : SV_Target
             {
                 half4 color = 0.0h;
                 const float kernelSize = 4;
-                const half kernelSize2Rcp = 1.0h / (kernelSize * kernelSize);
+                const half kernelSizeRcp = 1.0h / kernelSize;
                 const float halfKernel = (kernelSize - 1.0) * 0.5;
 
-                for (float y = 0.0f; y < kernelSize; y++)
+                for (float i = 0.0f; i < kernelSize; i++)
                 {
-                    for (float x = 0.0f; x < kernelSize; x++)
-                    {
-                        float2 offset = float2(x, y) - halfKernel;
-                        color += SampleLinear(input.uv + _BlitTexture_TexelSize.xy * offset);
-                    }
+                    float2 offset = (i - halfKernel) * _Direction * _MainTex_TexelSize.xy;
+                    color += SampleLinear(input.uv + offset);
                 }
-                return color * kernelSize2Rcp;
+                return color * kernelSizeRcp;
             }
             ENDHLSL
         }

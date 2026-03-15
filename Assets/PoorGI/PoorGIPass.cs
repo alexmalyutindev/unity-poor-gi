@@ -50,6 +50,7 @@ namespace AlexMalyutin.PoorGI
 
             public Material SSGIMaterial;
             public int UpsaleType;
+            public float TraceScale;
         }
 
         public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
@@ -72,19 +73,21 @@ namespace AlexMalyutin.PoorGI
             var screenWidth = cameraData.scaledWidth;
             var screenHeight = cameraData.scaledHeight;
 
+            // TODO: Add depth downsample support for other scale factors! 
             var traceScale = 4.0f;
             var traceWidth = Mathf.CeilToInt(screenWidth / traceScale);
             var traceHeight = Mathf.CeilToInt(screenHeight / traceScale);
             var traceBufferWidth = traceWidth;
             var traceBufferHeight = traceHeight;
 
+            passData.TraceScale = traceScale;
             passData.TraceWidth = traceWidth;
             passData.TraceHeight = traceHeight;
 
             var traceDepthDesc = new TextureDesc(traceBufferWidth, traceBufferHeight)
             {
                 name = "_TraceDepth",
-                format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.RGHalf, false),
+                format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.ARGBHalf, false),
                 useMipMap = true,
                 autoGenerateMips = false,
             };
@@ -171,30 +174,29 @@ namespace AlexMalyutin.PoorGI
                 }
                 cmd.EndSample("Tracing");
 
-                if (true)
+                cmd.BeginSample("Filtering");
                 {
-                    cmd.BeginSample("Box Filter");
+                    if (true)
+                    {
+                        cmd.BeginSample("BoxFilter.Irradiance");
+                        BoxFilter(cmd, data, data.Irradiance, data.TempTraceBufferMips);
+                        cmd.EndSample("BoxFilter.Irradiance");
 
-                    cmd.SetRenderTarget(data.TempTraceBufferMips);
-                    cmd.SetGlobalTexture("_BlitTexture", data.Irradiance);
-                    DrawFullScreenTriangle(cmd, data, (int)Pass.BoxFilter);
-                    cmd.Blit(data.TempTraceBufferMips, data.Irradiance);
+                        cmd.BeginSample("BoxFilter.SH");
+                        BoxFilter(cmd, data, data.SH, data.TempTraceBufferMips);
+                        cmd.EndSample("BoxFilter.SH");
+                    }
 
-                    cmd.SetRenderTarget(data.TempTraceBufferMips);
-                    cmd.SetGlobalTexture("_BlitTexture", data.SH);
-                    DrawFullScreenTriangle(cmd, data, (int)Pass.BoxFilter);
-                    cmd.Blit(data.TempTraceBufferMips, data.SH);
-                
-                    cmd.EndSample("Box Filter");
+                    // Blur GI
+                    if (true)
+                    {
+                        cmd.BeginSample("BilateralBlur");
+                        BilateralBlur(cmd, data, data.Irradiance, data.TempTraceBufferMips);
+                        BilateralBlur(cmd, data, data.SH, data.TempTraceBufferMips);
+                        cmd.EndSample("BilateralBlur");
+                    }
                 }
-
-                // Blur GI
-                cmd.BeginSample("Bilateral Blur");
-                {
-                    BilateralBlur(cmd, data, data.Irradiance, data.TempTraceBufferMips);
-                    BilateralBlur(cmd, data, data.SH, data.TempTraceBufferMips);
-                }
-                cmd.EndSample("Bilateral Blur");
+                cmd.EndSample("Filtering");
 
                 cmd.BeginSample("Final Bilateral Upscaling");
                 {
@@ -209,7 +211,7 @@ namespace AlexMalyutin.PoorGI
 
                     cmd.SetGlobalTexture("_GBuffer0", data.GBuffer0);
 
-                    cmd.SetGlobalFloat("_UpscaleFactor", 1.0f / 4.0f);
+                    cmd.SetGlobalFloat("_UpscaleFactor", 1.0f / data.TraceScale);
                     DrawFullScreenTriangle(cmd, data, (int)Pass.ResolveGI);
                 }
                 cmd.EndSample("Final Bilateral Upscaling");
@@ -311,6 +313,14 @@ namespace AlexMalyutin.PoorGI
             cmd.Blit(src, tmp, data.SSGIMaterial, (int)Pass.BilateralBlur);
             cmd.SetGlobalVector("_Direction", new Vector4(0, 1));
             cmd.Blit(tmp, src, data.SSGIMaterial, (int)Pass.BilateralBlur);
+        }     
+        
+        private static void BoxFilter(CommandBuffer cmd, PassData data, TextureHandle src, TextureHandle tmp)
+        {
+            cmd.SetGlobalVector("_Direction", new Vector4(1, 0));
+            cmd.Blit(src, tmp, data.SSGIMaterial, (int)Pass.BoxFilter);
+            cmd.SetGlobalVector("_Direction", new Vector4(0, 1));
+            cmd.Blit(tmp, src, data.SSGIMaterial, (int)Pass.BoxFilter);
         }
 
         enum Pass : int
