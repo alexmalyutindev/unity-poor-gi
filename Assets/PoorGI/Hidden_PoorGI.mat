@@ -11,7 +11,8 @@ Material:
   m_Shader: {fileID: 4800000, guid: ca2c9657c6e54c541a0f65f0806793de, type: 3}
   m_Parent: {fileID: 0}
   m_ModifiedSerializedProperties: 0
-  m_ValidKeywords: []
+  m_ValidKeywords:
+  - USE_VISIBILITY_BITMASK
   m_InvalidKeywords:
   - USE_VISINILITY_BITMASK
   m_LightmapFlags: 4
@@ -46,13 +47,14 @@ Material:
         m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
-    - _BlurSize: 2
+    - _BlurSize: 1
     - _EdgeSensitivity: 50
+    - _MipLevelFactor: 8
     - _RayLength: 1
-    - _RaysCount: 8
-    - _StepsCount: 8
+    - _RaysCount: 16
+    - _StepsCount: 6
     - _USE_VISINILITY_BITMASK: 1
-    - _UseVisibilityBitmask: 0
+    - _UseVisibilityBitmask: 1
     m_Colors: []
   m_BuildTextureStacks: []
   m_AllowLocking: 1
