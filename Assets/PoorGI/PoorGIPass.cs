@@ -37,20 +37,15 @@ namespace AlexMalyutin.PoorGI
             public TextureHandle VarianceDepth;
 
             public TextureHandle TempTraceBufferMips;
-            public TextureHandle TempTraceBufferMips2;
-            public TextureHandle TempTraceBufferLowRes;
 
-            public TextureHandle Irradiance;
-            public TextureHandle Irradiance2;
-            public TextureHandle SH;
-            public TextureHandle IrradianceLowRes;
-            public TextureHandle SHLowRes;
+            public TextureHandle ColorBuffer0;
+            public TextureHandle ColorBuffer1;
+            public TextureHandle ColorBuffer2;
 
             public TextureHandle CameraColorTarget;
             public TextureHandle GBuffer0;
 
-            public Material SSGIMaterial;
-            public int UpsaleType;
+            public Material Material;
             public float TraceScale;
         }
 
@@ -62,8 +57,7 @@ namespace AlexMalyutin.PoorGI
             using var builder = renderGraph.AddUnsafePass<PassData>(nameof(PoorGIPass), out var passData);
             builder.AllowPassCulling(false);
 
-            passData.UpsaleType = _upscaleType;
-            passData.SSGIMaterial = _ssgiMaterial;
+            passData.Material = _ssgiMaterial;
 
             passData.CameraDepth = resourceData.cameraDepthTexture;
             builder.UseTexture(passData.CameraDepth);
@@ -109,35 +103,20 @@ namespace AlexMalyutin.PoorGI
                 format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.ARGBFloat, isSRGB: false),
                 clearBuffer = false,
             };
-            passData.Irradiance = renderGraph.CreateTexture(giBufferDesc);
-            builder.UseTexture(passData.Irradiance);
+            passData.ColorBuffer0 = renderGraph.CreateTexture(giBufferDesc);
+            builder.UseTexture(passData.ColorBuffer0);
             giBufferDesc.name = "_IrradianceBuffer2";
-            passData.Irradiance2 = renderGraph.CreateTexture(giBufferDesc);
-            builder.UseTexture(passData.Irradiance2);
+            passData.ColorBuffer1 = renderGraph.CreateTexture(giBufferDesc);
+            builder.UseTexture(passData.ColorBuffer1);
 
             giBufferDesc.name = "_SHBuffer";
-            passData.SH = builder.CreateTransientTexture(giBufferDesc);
-
-            // HalfRes buffers
-            {
-                var desc = giBufferDesc;
-                desc.name = "_IrradianceBuffer_Half";
-                desc.width = traceBufferWidth / 2;
-                desc.height = traceBufferHeight / 2;
-                passData.IrradianceLowRes = builder.CreateTransientTexture(desc);
-                desc.name = "_SHBuffer_Half";
-                passData.SHLowRes = builder.CreateTransientTexture(desc);
-
-                desc.name = "_Temp_Half";
-                passData.TempTraceBufferLowRes = builder.CreateTransientTexture(desc);
-            }
+            passData.ColorBuffer2 = builder.CreateTransientTexture(giBufferDesc);
 
             giBufferDesc.name = "_Temp_Mips";
             giBufferDesc.useMipMap = true;
             giBufferDesc.autoGenerateMips = false;
             giBufferDesc.filterMode = FilterMode.Bilinear;
             passData.TempTraceBufferMips = builder.CreateTransientTexture(giBufferDesc);
-            passData.TempTraceBufferMips2 = builder.CreateTransientTexture(giBufferDesc);
 
             passData.GBuffer0 = resourceData.gBuffer[0];
             builder.UseTexture(passData.GBuffer0);
@@ -149,15 +128,15 @@ namespace AlexMalyutin.PoorGI
                 // Downsample Depth
                 cmd.BeginSample("Prepare Fame Buffers");
                 {
-                    cmd.Blit(data.CameraDepth, data.TraceDepth, data.SSGIMaterial, (int)Pass.DownSampleDepthPass);
+                    cmd.Blit(data.CameraDepth, data.TraceDepth, data.Material, (int)Pass.DownSampleDepthPass);
                     cmd.GenerateMips(data.TraceDepth);
 
                     // Variance Depth
-                    cmd.Blit(data.CameraDepth, data.TempTraceBufferMips, data.SSGIMaterial, (int)Pass.VarianceDepthPass);
-                    cmd.Blit(data.TempTraceBufferMips, data.VarianceDepth, data.SSGIMaterial, (int)Pass.VarianceDepthGaussianBlur);
+                    cmd.Blit(data.CameraDepth, data.TempTraceBufferMips, data.Material, (int)Pass.VarianceDepthPass);
+                    cmd.Blit(data.TempTraceBufferMips, data.VarianceDepth, data.Material, (int)Pass.VarianceDepthGaussianBlur);
 
                     // Downsample Color
-                    cmd.Blit(data.CameraColorTarget, data.TempTraceBufferMips, data.SSGIMaterial, (int)Pass.BlitBlur);
+                    cmd.Blit(data.CameraColorTarget, data.TempTraceBufferMips, data.Material, (int)Pass.BlitBlur);
                     cmd.GenerateMips(data.TempTraceBufferMips);
                     // TODO: Make blur frame color mip chain
                     // cmd.DrawMesh();
@@ -167,14 +146,14 @@ namespace AlexMalyutin.PoorGI
                 // Tracing
                 cmd.BeginSample("Tracing");
                 {
-                    var bindings = CreateMRTBinding(data.Irradiance, data.Irradiance2, data.SH);
+                    var bindings = CreateMRTBinding(data.ColorBuffer0, data.ColorBuffer1, data.ColorBuffer2);
                     cmd.SetRenderTarget(bindings);
 
                     // TODO: Pass With MaterialPropBlock.
                     cmd.SetGlobalTexture("_TraceColor", data.TempTraceBufferMips);
                     cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
                     cmd.SetGlobalTexture("_VarianceDepth", data.VarianceDepth);
-                    data.SSGIMaterial.EnableKeyword("USE_SH01");
+                    data.Material.EnableKeyword("USE_SH01");
                     DrawFullScreenTriangle(cmd, data, (int)Pass.TraceGI);
                 }
                 cmd.EndSample("Tracing");
@@ -184,15 +163,15 @@ namespace AlexMalyutin.PoorGI
                     if (true)
                     {
                         cmd.BeginSample("BoxFilter.Irradiance");
-                        BoxFilter(cmd, data, data.Irradiance, data.TempTraceBufferMips);
+                        BoxFilter(cmd, data, data.ColorBuffer0, data.TempTraceBufferMips);
                         cmd.EndSample("BoxFilter.Irradiance");
     
                         cmd.BeginSample("BoxFilter.Irradiance2");
-                        BoxFilter(cmd, data, data.Irradiance2, data.TempTraceBufferMips);
+                        BoxFilter(cmd, data, data.ColorBuffer1, data.TempTraceBufferMips);
                         cmd.EndSample("BoxFilter.Irradiance2");
 
                         cmd.BeginSample("BoxFilter.SH");
-                        BoxFilter(cmd, data, data.SH, data.TempTraceBufferMips);
+                        BoxFilter(cmd, data, data.ColorBuffer2, data.TempTraceBufferMips);
                         cmd.EndSample("BoxFilter.SH");
                     }
 
@@ -200,9 +179,9 @@ namespace AlexMalyutin.PoorGI
                     if (true)
                     {
                         cmd.BeginSample("BilateralBlur");
-                        BilateralBlur(cmd, data, data.Irradiance, data.TempTraceBufferMips);
-                        BilateralBlur(cmd, data, data.Irradiance2, data.TempTraceBufferMips);
-                        BilateralBlur(cmd, data, data.SH, data.TempTraceBufferMips);
+                        BilateralBlur(cmd, data, data.ColorBuffer0, data.TempTraceBufferMips);
+                        BilateralBlur(cmd, data, data.ColorBuffer1, data.TempTraceBufferMips);
+                        BilateralBlur(cmd, data, data.ColorBuffer2, data.TempTraceBufferMips);
                         cmd.EndSample("BilateralBlur");
                     }
                 }
@@ -212,13 +191,12 @@ namespace AlexMalyutin.PoorGI
                 {
                     cmd.SetRenderTarget(data.CameraColorTarget);
 
-                    cmd.SetGlobalInteger("_UpscaleType", data.UpsaleType);
                     cmd.SetGlobalVector("_TraceSize", new Vector4(data.TraceWidth, data.TraceHeight));
 
                     cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
-                    cmd.SetGlobalTexture("_Irradiance", data.Irradiance);
-                    cmd.SetGlobalTexture("_Irradiance2", data.Irradiance2);
-                    cmd.SetGlobalTexture("_SH", data.SH);
+                    cmd.SetGlobalTexture("_Irradiance", data.ColorBuffer0);
+                    cmd.SetGlobalTexture("_Irradiance2", data.ColorBuffer1);
+                    cmd.SetGlobalTexture("_SH", data.ColorBuffer2);
 
                     cmd.SetGlobalTexture("_GBuffer0", data.GBuffer0);
 
@@ -352,7 +330,7 @@ namespace AlexMalyutin.PoorGI
 
         private static void DrawFullScreenTriangle(CommandBuffer cmd, PassData data, int pass)
         {
-            cmd.DrawMesh(_triangleMesh, Matrix4x4.identity, data.SSGIMaterial, 0, pass);
+            cmd.DrawMesh(_triangleMesh, Matrix4x4.identity, data.Material, 0, pass);
         }
         
         private static void BilateralBlur(CommandBuffer cmd, PassData data, TextureHandle src, TextureHandle tmp)
@@ -361,17 +339,17 @@ namespace AlexMalyutin.PoorGI
             cmd.SetGlobalTexture("_RefrenceDepth", data.TraceDepth);
 
             cmd.SetGlobalVector("_Direction", new Vector4(1, 0));
-            cmd.Blit(src, tmp, data.SSGIMaterial, (int)Pass.BilateralBlur);
+            cmd.Blit(src, tmp, data.Material, (int)Pass.BilateralBlur);
             cmd.SetGlobalVector("_Direction", new Vector4(0, 1));
-            cmd.Blit(tmp, src, data.SSGIMaterial, (int)Pass.BilateralBlur);
+            cmd.Blit(tmp, src, data.Material, (int)Pass.BilateralBlur);
         }     
         
         private static void BoxFilter(CommandBuffer cmd, PassData data, TextureHandle src, TextureHandle tmp)
         {
             cmd.SetGlobalVector("_Direction", new Vector4(1, 0));
-            cmd.Blit(src, tmp, data.SSGIMaterial, (int)Pass.BoxFilter);
+            cmd.Blit(src, tmp, data.Material, (int)Pass.BoxFilter);
             cmd.SetGlobalVector("_Direction", new Vector4(0, 1));
-            cmd.Blit(tmp, src, data.SSGIMaterial, (int)Pass.BoxFilter);
+            cmd.Blit(tmp, src, data.Material, (int)Pass.BoxFilter);
         }
 
         enum Pass : int

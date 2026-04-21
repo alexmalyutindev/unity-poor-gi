@@ -680,23 +680,16 @@ Shader "Hidden/PoorGI"
                 // half4 ligting = (irradiance + reflection) * irradianceColor;
                 return LinearToSRGB(ligting);
             }
-
-            half4 Fragmet(Varyings input) : SV_Target
+            
+            half4 SampleGI_SH01(half2 positionCS, half hiLinearDepth)
             {
-                half3 gbuffer0 = LOAD_TEXTURE2D(_GBuffer0, input.positionCS.xy);
-                half hiDepth = LoadSceneDepth(floor(input.positionCS.xy));
-                hiDepth = LinearEyeDepth(hiDepth, _ZBufferParams);
-
-                // TEST:
-                #if defined(USE_SH01)
-                
-                half2 coord = input.positionCS / 4;
+                half2 coord = positionCS / 4;
                 half2 texel = _Irradiance_TexelSize.xy;
 
                 half2 center = coord * texel;
-                half3 normalWS = LoadSceneNormals(input.positionCS);
+                half3 normalWS = LoadSceneNormals(positionCS);
                 half3 N = TransformWorldToCameraNormal(normalWS);
-                half3 V = -normalize(TransformScreenUVToViewLinear(center, hiDepth)); // hiDepth - is linear!
+                half3 V = -normalize(TransformScreenUVToViewLinear(center, hiLinearDepth));
                 half3 R = reflect(-V, N);
 
                 half4 uv01;
@@ -707,24 +700,36 @@ Shader "Hidden/PoorGI"
                 uv23.zw = center - half2(0.0h, texel.y);
 
                 half4 lowDepthABCD = Sample4(_TraceDepth, uv01, uv23);
-                half4 weights = exp2(-20.0h * abs(hiDepth - lowDepthABCD)); // hiDepth - is linear!
+                half4 weights = exp2(-20.0h * abs(hiLinearDepth - lowDepthABCD));
                 weights = saturate(weights / dot(1.0h, weights));
 
                 half4 shR = Sample4_Bilinear(_Irradiance, uv01, uv23, weights);
                 half4 shG = Sample4_Bilinear(_Irradiance2, uv01, uv23, weights);
                 half4 shB = Sample4_Bilinear(_SH, uv01, uv23, weights);
 
-                half3 gi = EvaluateIrradianceSH01(shR, shG, shB, N);
+                half3 irradiance = EvaluateIrradianceSH01(shR, shG, shB, N);
                 half3 reflection = EvaluateIrradianceSH01(shR, shG, shB, R);
                 const half smoothness = 0.2h;
-                return half4(lerp(gi, reflection, smoothness), 1.0h);
+                half3 ligting = lerp(irradiance, reflection, smoothness);
+                return half4((ligting), 1.0h);
+                return half4(LinearToSRGB(ligting), 1.0h);
+            }
 
-                #endif
+            half4 Fragmet(Varyings input) : SV_Target
+            {
+                half3 gbuffer0 = LOAD_TEXTURE2D(_GBuffer0, input.positionCS.xy);
+                half hiDepth = LoadSceneDepth(floor(input.positionCS.xy));
+                hiDepth = LinearEyeDepth(hiDepth, _ZBufferParams);
 
+                // TEST:
+                #if defined(USE_SH01)
+                return half4(gbuffer0, 1.0h) * SampleGI_SH01(input.positionCS.xy, hiDepth);
+                #else
                 // DEBUG:
                 // return SampleGI(input.positionCS.xy, hiDepth);
                 // return LinearToSRGB(SAMPLE_TEXTURE2D(_Irradiance, sampler_PointClamp, input.uv));
                 return half4(gbuffer0, 1.0h) * SampleGI(input.positionCS.xy, hiDepth);
+                #endif
             }
             ENDHLSL
         }
