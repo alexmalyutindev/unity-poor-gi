@@ -335,7 +335,7 @@ namespace AlexMalyutin.PoorGI
         
         private static void BilateralBlur(CommandBuffer cmd, PassData data, TextureHandle src, TextureHandle tmp)
         {
-            cmd.SetGlobalTexture("_RefrenceDepthLod", 0);
+            cmd.SetGlobalFloat("_RefrenceDepthLod", 0);
             cmd.SetGlobalTexture("_RefrenceDepth", data.TraceDepth);
 
             cmd.SetGlobalVector("_Direction", new Vector4(1, 0));

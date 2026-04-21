@@ -10,9 +10,14 @@ Shader "Hidden/PoorGI"
 
         _BlurSize("Bilateral Blur Size", Range(1, 6)) = 4
         _EdgeSensitivity("Edge Sensitivity", Range(5, 50)) = 30
+
+        [Space]
         _RayLength("Ray Length", Range(0.1, 1.0)) = 0.5
         _RaysCount("Rays Count", Range(2, 16)) = 4
         _StepsCount("Steps Count", Range(2, 16)) = 4
+        _DepthThickness("Depth Thickness", Range(0.01, 5.0)) = 2.0
+
+        [Space]
         _MipLevelFactor("MipLevel Factor", Range(1, 32)) = 8.0
 
         [NonModifiableTextureData][HideInInspector]
@@ -43,6 +48,7 @@ Shader "Hidden/PoorGI"
 
         float _RaysCount;
         float _StepsCount;
+        float _DepthThickness;
 
         float4 _STBN_TexelSize;
         Texture2D<half2> _STBN;
@@ -362,7 +368,7 @@ Shader "Hidden/PoorGI"
             {
                 const half rayCount = floor(_RaysCount);
                 const half raySteps = floor(_StepsCount);
-                const half thickness = 2.0h;
+                const half thickness = _DepthThickness;
                 const half probOffsetZ = 0.02h;
     
                 const half rayStepsRcp = rcp(raySteps);
@@ -492,6 +498,7 @@ Shader "Hidden/PoorGI"
                         finalColor += currentLighting * rayCountRcp;
                         finalSH += half4(kSHBasis1 * rayDirectionVS_norm, kSHBasis0) * lum;
                         #else
+                        currentLighting *= rayCountRcp;
                         sh0 += currentLighting * kSHBasis0;
                         shR += currentLighting * rayDirectionVS_norm.x * kSHBasis1;
                         shG += currentLighting * rayDirectionVS_norm.y * kSHBasis1;
@@ -711,7 +718,7 @@ Shader "Hidden/PoorGI"
                 half3 reflection = EvaluateIrradianceSH01(shR, shG, shB, R);
                 const half smoothness = 0.2h;
                 half3 ligting = lerp(irradiance, reflection, smoothness);
-                return half4((ligting), 1.0h);
+                // return half4(ligting * 4.0h, 1.0h);
                 return half4(LinearToSRGB(ligting), 1.0h);
             }
 
@@ -785,11 +792,11 @@ Shader "Hidden/PoorGI"
                 }
 
                 color /= totalWeight;
-                return color;
+                // return color;
 
                 // NOTE: Luminance threshold.
                 half lum = Luminance(color);
-                return color * step(0.5h, lum);
+                return color * smoothstep(0.3h, 0.4h, lum);
             }
             ENDHLSL
         }

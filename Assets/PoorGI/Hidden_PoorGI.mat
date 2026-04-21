@@ -48,12 +48,13 @@ Material:
         m_Offset: {x: 0, y: 0}
     m_Ints: []
     m_Floats:
-    - _BlurSize: 3
+    - _BlurSize: 6
+    - _DepthThickness: 4
     - _EdgeSensitivity: 50
     - _MipLevelFactor: 8
-    - _RayLength: 0.66
-    - _RaysCount: 8
-    - _StepsCount: 8
+    - _RayLength: 1
+    - _RaysCount: 6
+    - _StepsCount: 16
     - _USE_VISINILITY_BITMASK: 1
     - _UseVisibilityBitmask: 1
     m_Colors: []
