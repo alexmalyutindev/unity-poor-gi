@@ -259,6 +259,7 @@ Shader "Hidden/PoorGI"
 
             #pragma editor_sync_compilation
             #pragma multi_compile _ USE_VISIBILITY_BITMASK
+            #pragma multi_compile _ USE_SH01
 
             #pragma editor_sync_compilation
             #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/SphericalHarmonics.hlsl"
@@ -347,8 +348,14 @@ Shader "Hidden/PoorGI"
 
             struct Output
             {
+                #if !defined(USE_SH01)
                 half4 irradianceColor : SV_Target0;
                 half4 irradianceSH : SV_Target1;
+                #else
+                half4 SHr : SV_Target0;
+                half4 SHg : SV_Target1;
+                half4 SHb : SV_Target2;
+                #endif
             };
 
             Output Fragmet(Varyings input)
@@ -399,8 +406,15 @@ Shader "Hidden/PoorGI"
                 half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth - 0.01h);
                 half3 viewDirectionVS = -normalize(probeVS);
 
+                #if !defined(USE_SH01)
                 half3 finalColor = half(0.0h);
                 half4 finalSH = half(0.0h);
+                #else
+                half3 sh0 = half3(0.0h, 0.0h, 0.0h);
+                half3 shR = half3(0.0h, 0.0h, 0.0h);
+                half3 shG = half3(0.0h, 0.0h, 0.0h);
+                half3 shB = half3(0.0h, 0.0h, 0.0h);
+                #endif
 
                 UNITY_LOOP
                 for (half alpha = 0.0h; alpha < TWO_PI - 0.01h; alpha += deltaAngle)
@@ -471,17 +485,30 @@ Shader "Hidden/PoorGI"
                         }
                         #endif
 
+                        #if !defined(USE_SH01)
                         // SH Ligting: https://deadvoxels.blogspot.com/2009/08/has-someone-tried-this-before.html
                         // Half-Life 2 Shading: https://drivers.amd.com/developer/gdc/D3DTutorial10_Half-Life2_Shading.pdf
                         half lum = Luminance(currentLighting);
                         finalColor += currentLighting * rayCountRcp;
                         finalSH += half4(kSHBasis1 * rayDirectionVS_norm, kSHBasis0) * lum;
+                        #else
+                        sh0 += currentLighting * kSHBasis0;
+                        shR += currentLighting * rayDirectionVS_norm.x * kSHBasis1;
+                        shG += currentLighting * rayDirectionVS_norm.y * kSHBasis1;
+                        shB += currentLighting * rayDirectionVS_norm.z * kSHBasis1;
+                        #endif
                     }
                 }
 
                 Output output;
+                #if !defined(USE_SH01)
                 output.irradianceColor = half4(finalColor, probeLinearDepth);
                 output.irradianceSH = finalSH;
+                #else
+                output.SHr = half4(shR, sh0.r);
+                output.SHg = half4(shG, sh0.g);
+                output.SHb = half4(shB, sh0.b);
+                #endif
                 return output;
             }
             ENDHLSL
@@ -538,6 +565,8 @@ Shader "Hidden/PoorGI"
             HLSLPROGRAM
             #pragma vertex FulscreenTriangleVertex
             #pragma fragment Fragmet
+            
+            #pragma multi_compile _ USE_SH01
 
             half _UpscaleFactor;
             half4 _TraceSize;
@@ -545,6 +574,7 @@ Shader "Hidden/PoorGI"
 
             Texture2D<half> _TraceDepth;
             Texture2D<half4> _Irradiance;
+            Texture2D<half4> _Irradiance2;
             Texture2D<half4> _SH;
             TEXTURE2D(_GBuffer0);
 
@@ -564,6 +594,41 @@ Shader "Hidden/PoorGI"
             inline half EvaluateIrradianceSH1(half4 sh, half3 v) { return dot(sh.xyz, v); }
             // SH0: w; SH1 xyz;
             inline half EvaluateIrradianceSH01(half4 sh, half3 v) { return sh.w + EvaluateIrradianceSH1(sh, v); }
+            // SH0: (shR.w, shG.w, shB.w), SH1R: shR.rgb, etc.
+            inline half3 EvaluateIrradianceSH01(half4 shR, half4 shG,half4  shB, half3 v)
+            {
+                half3 gi = half3(shR.a, shG.a, shB.a);
+                gi += shR.rgb * v.x;
+                gi += shG.rgb * v.y;
+                gi += shB.rgb * v.z;
+                return gi;
+            }
+
+            half4 Sample4(Texture2D<half> tex, float4 uv01, float4 uv23)
+            {
+                half4 output;
+                output.x = SAMPLE_TEXTURE2D_LOD(tex, sampler_LinearClamp, uv01.xy, 0).x;
+                output.y = SAMPLE_TEXTURE2D_LOD(tex, sampler_LinearClamp, uv01.zw, 0).x;
+                output.z = SAMPLE_TEXTURE2D_LOD(tex, sampler_LinearClamp, uv23.xy, 0).x;
+                output.w = SAMPLE_TEXTURE2D_LOD(tex, sampler_LinearClamp, uv23.zw, 0).x;
+                return output;
+            }
+
+            void Sample4(Texture2D<half4> tex, float4 uv01, float4 uv23,
+                out half4 a, out half4 b, out half4 c, out half4 d)
+            {
+                a = SAMPLE_TEXTURE2D_LOD(tex, sampler_LinearClamp, uv01.xy, 0);
+                b = SAMPLE_TEXTURE2D_LOD(tex, sampler_LinearClamp, uv01.zw, 0);
+                c = SAMPLE_TEXTURE2D_LOD(tex, sampler_LinearClamp, uv23.xy, 0);
+                d = SAMPLE_TEXTURE2D_LOD(tex, sampler_LinearClamp, uv23.zw, 0);
+            }
+
+            half4 Sample4_Bilinear(Texture2D<half4> tex, float4 uv01, float4 uv23, half4 weights)
+            {
+                half4 a, b, c, d;
+                Sample4(tex, uv01, uv23, a, b, c, d);
+                return mul(weights, half4x4(a, b, c, d));
+            }
 
             half4 SampleGI(half2 positionCS, half hiLinearDepth)
             {
@@ -621,6 +686,40 @@ Shader "Hidden/PoorGI"
                 half3 gbuffer0 = LOAD_TEXTURE2D(_GBuffer0, input.positionCS.xy);
                 half hiDepth = LoadSceneDepth(floor(input.positionCS.xy));
                 hiDepth = LinearEyeDepth(hiDepth, _ZBufferParams);
+
+                // TEST:
+                #if defined(USE_SH01)
+                
+                half2 coord = input.positionCS / 4;
+                half2 texel = _Irradiance_TexelSize.xy;
+
+                half2 center = coord * texel;
+                half3 normalWS = LoadSceneNormals(input.positionCS);
+                half3 N = TransformWorldToCameraNormal(normalWS);
+                half3 V = -normalize(TransformScreenUVToViewLinear(center, hiDepth)); // hiDepth - is linear!
+                half3 R = reflect(-V, N);
+
+                half4 uv01;
+                half4 uv23;
+                uv01.xy = center + half2(texel.x, 0.0h);
+                uv01.zw = center - half2(texel.x, 0.0h);
+                uv23.xy = center + half2(0.0h, texel.y);
+                uv23.zw = center - half2(0.0h, texel.y);
+
+                half4 lowDepthABCD = Sample4(_TraceDepth, uv01, uv23);
+                half4 weights = exp2(-20.0h * abs(hiDepth - lowDepthABCD)); // hiDepth - is linear!
+                weights = saturate(weights / dot(1.0h, weights));
+
+                half4 shR = Sample4_Bilinear(_Irradiance, uv01, uv23, weights);
+                half4 shG = Sample4_Bilinear(_Irradiance2, uv01, uv23, weights);
+                half4 shB = Sample4_Bilinear(_SH, uv01, uv23, weights);
+
+                half3 gi = EvaluateIrradianceSH01(shR, shG, shB, N);
+                half3 reflection = EvaluateIrradianceSH01(shR, shG, shB, R);
+                const half smoothness = 0.2h;
+                return half4(lerp(gi, reflection, smoothness), 1.0h);
+
+                #endif
 
                 // DEBUG:
                 // return SampleGI(input.positionCS.xy, hiDepth);

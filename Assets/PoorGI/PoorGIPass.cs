@@ -41,6 +41,7 @@ namespace AlexMalyutin.PoorGI
             public TextureHandle TempTraceBufferLowRes;
 
             public TextureHandle Irradiance;
+            public TextureHandle Irradiance2;
             public TextureHandle SH;
             public TextureHandle IrradianceLowRes;
             public TextureHandle SHLowRes;
@@ -110,6 +111,9 @@ namespace AlexMalyutin.PoorGI
             };
             passData.Irradiance = renderGraph.CreateTexture(giBufferDesc);
             builder.UseTexture(passData.Irradiance);
+            giBufferDesc.name = "_IrradianceBuffer2";
+            passData.Irradiance2 = renderGraph.CreateTexture(giBufferDesc);
+            builder.UseTexture(passData.Irradiance2);
 
             giBufferDesc.name = "_SHBuffer";
             passData.SH = builder.CreateTransientTexture(giBufferDesc);
@@ -163,13 +167,14 @@ namespace AlexMalyutin.PoorGI
                 // Tracing
                 cmd.BeginSample("Tracing");
                 {
-                    var bindings = CreateMRTBinding(data.Irradiance, data.SH);
+                    var bindings = CreateMRTBinding(data.Irradiance, data.Irradiance2, data.SH);
                     cmd.SetRenderTarget(bindings);
 
                     // TODO: Pass With MaterialPropBlock.
                     cmd.SetGlobalTexture("_TraceColor", data.TempTraceBufferMips);
                     cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
                     cmd.SetGlobalTexture("_VarianceDepth", data.VarianceDepth);
+                    data.SSGIMaterial.EnableKeyword("USE_SH01");
                     DrawFullScreenTriangle(cmd, data, (int)Pass.TraceGI);
                 }
                 cmd.EndSample("Tracing");
@@ -181,6 +186,10 @@ namespace AlexMalyutin.PoorGI
                         cmd.BeginSample("BoxFilter.Irradiance");
                         BoxFilter(cmd, data, data.Irradiance, data.TempTraceBufferMips);
                         cmd.EndSample("BoxFilter.Irradiance");
+    
+                        cmd.BeginSample("BoxFilter.Irradiance2");
+                        BoxFilter(cmd, data, data.Irradiance2, data.TempTraceBufferMips);
+                        cmd.EndSample("BoxFilter.Irradiance2");
 
                         cmd.BeginSample("BoxFilter.SH");
                         BoxFilter(cmd, data, data.SH, data.TempTraceBufferMips);
@@ -192,6 +201,7 @@ namespace AlexMalyutin.PoorGI
                     {
                         cmd.BeginSample("BilateralBlur");
                         BilateralBlur(cmd, data, data.Irradiance, data.TempTraceBufferMips);
+                        BilateralBlur(cmd, data, data.Irradiance2, data.TempTraceBufferMips);
                         BilateralBlur(cmd, data, data.SH, data.TempTraceBufferMips);
                         cmd.EndSample("BilateralBlur");
                     }
@@ -207,6 +217,7 @@ namespace AlexMalyutin.PoorGI
 
                     cmd.SetGlobalTexture("_TraceDepth", data.TraceDepth);
                     cmd.SetGlobalTexture("_Irradiance", data.Irradiance);
+                    cmd.SetGlobalTexture("_Irradiance2", data.Irradiance2);
                     cmd.SetGlobalTexture("_SH", data.SH);
 
                     cmd.SetGlobalTexture("_GBuffer0", data.GBuffer0);
@@ -239,6 +250,46 @@ namespace AlexMalyutin.PoorGI
                     colorRenderTargets = targets[..2],
                     colorLoadActions = load[..2],
                     colorStoreActions = store[..2],
+                    depthRenderTarget = colorA,
+                    flags = RenderTargetFlags.None,
+                };
+                return bindings;
+            }
+            finally
+            {
+                ArrayPool<RenderTargetIdentifier>.Shared.Return(targets);
+                ArrayPool<RenderBufferLoadAction>.Shared.Return(load);
+                ArrayPool<RenderBufferStoreAction>.Shared.Return(store);
+            }
+        }
+
+        private static RenderTargetBinding CreateMRTBinding(TextureHandle colorA, TextureHandle colorB, TextureHandle colorC)
+        {
+            var targetsCount = 3;
+
+            var targets = ArrayPool<RenderTargetIdentifier>.Shared.Rent(targetsCount);
+            var load = ArrayPool<RenderBufferLoadAction>.Shared.Rent(targetsCount);
+            var store = ArrayPool<RenderBufferStoreAction>.Shared.Rent(targetsCount);
+
+            try
+            {
+                targets[0] = colorA;
+                load[0] = RenderBufferLoadAction.DontCare;
+                store[0] = RenderBufferStoreAction.Store;
+
+                targets[1] = colorB;
+                load[1] = RenderBufferLoadAction.DontCare;
+                store[1] = RenderBufferStoreAction.Store;
+
+                targets[2] = colorC;
+                load[2] = RenderBufferLoadAction.DontCare;
+                store[2] = RenderBufferStoreAction.Store;
+
+                var bindings = new RenderTargetBinding()
+                {
+                    colorRenderTargets = targets[..targetsCount],
+                    colorLoadActions = load[..targetsCount],
+                    colorStoreActions = store[..targetsCount],
                     depthRenderTarget = colorA,
                     flags = RenderTargetFlags.None,
                 };
