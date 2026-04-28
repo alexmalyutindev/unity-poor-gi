@@ -5,10 +5,12 @@ namespace AlexMalyutin.PoorGI
 {
     public class PoorGIFeature : ScriptableRendererFeature
     {
-        [Range(0, 4)]
-        public int UpscaleType;
-
         public Material SSGIMaterial;
+
+        [Header("Settings")]
+        public bool UseBoxFilter = true;
+        public bool UseBilateralFilter = true;
+
         private PoorGIPass _pass;
 
         public override void Create()
@@ -26,7 +28,7 @@ namespace AlexMalyutin.PoorGI
         public override void AddRenderPasses(ScriptableRenderer renderer, ref RenderingData renderingData)
         {
             if (renderingData.cameraData.isPreviewCamera) return;
-            _pass.Setup(UpscaleType);
+            _pass.Setup(UseBoxFilter, UseBilateralFilter);
             renderer.EnqueuePass(_pass);
         }
     }

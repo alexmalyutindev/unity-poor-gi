@@ -12,7 +12,8 @@ namespace AlexMalyutin.PoorGI
     public class PoorGIPass : ScriptableRenderPass
     {
         private readonly Material _ssgiMaterial;
-        private int _upscaleType;
+        private bool _useBoxFilter;
+        private bool _useBilateralFilter;
 
         private static Mesh _triangleMesh;
 
@@ -22,9 +23,10 @@ namespace AlexMalyutin.PoorGI
             CreateFullScreenTriangle();
         }
 
-        public void Setup(int upscaleType)
+        public void Setup(bool useBoxFilter, bool useBilateralFilter)
         {
-            _upscaleType = upscaleType;
+            _useBoxFilter = useBoxFilter;
+            _useBilateralFilter = useBilateralFilter;
         }
 
         private class PassData
@@ -48,6 +50,8 @@ namespace AlexMalyutin.PoorGI
 
             public Material Material;
             public float TraceScale;
+            public bool UseBoxFilter;
+            public bool UseBilateralFilter;
         }
 
         public override void RecordRenderGraph(RenderGraph renderGraph, ContextContainer frameData)
@@ -59,6 +63,10 @@ namespace AlexMalyutin.PoorGI
             builder.AllowPassCulling(false);
 
             passData.Material = _ssgiMaterial;
+
+            // Settings
+            passData.UseBoxFilter = _useBoxFilter;
+            passData.UseBilateralFilter = _useBilateralFilter;
 
             passData.CameraDepth = resourceData.cameraDepthTexture;
             builder.UseTexture(passData.CameraDepth);
@@ -190,7 +198,7 @@ namespace AlexMalyutin.PoorGI
 
                 cmd.BeginSample("Filtering");
                 {
-                    if (true)
+                    if (data.UseBoxFilter)
                     {
                         cmd.BeginSample("BoxFilter.Irradiance");
                         BoxFilter(cmd, data, data.ColorBuffer0, data.TempTraceBufferMips);
@@ -206,7 +214,7 @@ namespace AlexMalyutin.PoorGI
                     }
 
                     // Blur GI
-                    if (true)
+                    if (data.UseBilateralFilter)
                     {
                         cmd.BeginSample("BilateralBlur");
                         BilateralBlur(cmd, data, data.ColorBuffer0, data.TempTraceBufferMips);

@@ -18,7 +18,7 @@ Shader "Hidden/PoorGI"
         _DepthThickness("Depth Thickness", Range(0.01, 5.0)) = 2.0
 
         [Space]
-        _MipLevelFactor("MipLevel Factor", Range(1, 64)) = 8.0
+        _MipLevelFactor("MipLevel Factor", Range(0, 16)) = 8.0
 
         [NonModifiableTextureData][HideInInspector]
         _STBN("_STBN", 2D) = "black" {}
@@ -103,7 +103,7 @@ Shader "Hidden/PoorGI"
         half _BlurSize = 4.0h;
         half _EdgeSensitivity = 30.0h;
         half4 _MainTex_TexelSize;
-        TEXTURE2D(_MainTex);
+        Texture2D<half4> _MainTex;
 
         struct Attributes
         {
@@ -182,7 +182,7 @@ Shader "Hidden/PoorGI"
                 normalVS *= sign(-normalVS.z);
                 return normalVS;
             }
-            
+
             // Reconstruct view-space position from integer pixel coord + linear eye depth.
             // Uses the camera's projection parameters to avoid a full matrix multiply.
             float3 ReconstructPositionVS(int2 pixelCoord, half linearDepth)
@@ -190,7 +190,7 @@ Shader "Hidden/PoorGI"
                 // Convert pixel center to NDC [-1, 1]
                 float2 uv  = (pixelCoord + 0.5) * _MainTex_TexelSize.xy; // zw = 1/width, 1/height
                 float2 ndc = uv * 2.0 - 1.0;
-            
+
                 half4 positionVS = mul(UNITY_MATRIX_I_P, half4(mad(uv, half2(-2.0h, 2.0h), half2(1.0h, -1.0h)), UNITY_RAW_FAR_CLIP_VALUE, 1.0h));
                 positionVS.xyz /= positionVS.w;
                 positionVS.xyz *= linearDepth / positionVS.z;
@@ -312,7 +312,7 @@ Shader "Hidden/PoorGI"
 
                 return half3(normalize(cross(P2 - PC, P1 - PC)));
             }
-            
+
             // #define _2X2_BLUR_DEPTH
             #define _4X4_BLUR_DEPTH
 
@@ -502,14 +502,14 @@ Shader "Hidden/PoorGI"
                 const half raySteps = floor(_StepsCount);
                 const half thickness = _DepthThickness;
                 const half probOffsetZ = 0.02h;
-    
+
                 const half rayStepsRcp = rcp(raySteps);
                 const half rayCountRcp = rcp(rayCount);
 
                 uint2 tileCoord = floor(input.positionCS);
                 half probeLinearDepth = LoadLinearTraceDepth(tileCoord);
 
-                // NOTE: Hacky noise, STBN for step jitter, and regular pattern for angle jitter. 
+                // NOTE: Hacky noise, STBN for step jitter, and regular pattern for angle jitter.
                 half2 jitter = 0.0h;
                 jitter.y = LOAD_TEXTURE2D(_BayerMatrix, tileCoord % 4).a;
                 jitter.x = LOAD_TEXTURE2D(_BayerMatrix, (tileCoord + 1) % 4).a;
@@ -523,14 +523,14 @@ Shader "Hidden/PoorGI"
                 // jitter.x = angleOffset[2* (coords.x % 2) + (coords.y % 2)];
                 // jitter.y = angleOffset[tileCoord.x % 2 + 2 * (tileCoord.y % 2)];
                 // jitter.y = LOAD_TEXTURE2D(_BayerMatrix, tileCoord % 4).a;
-                
+
                 // jitter.y = InterleavedGradientNoise(tileCoord, 0);
-                
+
                 // jitter.x = (tileCoord.y % 4 + tileCoord.x % 4 * 4) * 0.25h * 0.25h;
                 // jitter.y = (tileCoord.x % 4 + tileCoord.y % 4 * 4) * 0.25h * 0.25h;
 
                 // uint tileIndex = tileCoord.x + tileCoord.y * 4;
-                // float baseAngle = float(tileIndex) / 16.0;   
+                // float baseAngle = float(tileIndex) / 16.0;
                 // float baseStep  = float(tileIndex % 4) / 4.0;
                 // jitter.y += baseAngle;
                 // jitter.x += baseStep;
@@ -574,7 +574,8 @@ Shader "Hidden/PoorGI"
 
                         half2 offset = rayDirection * noff;
                         int mipLevel = min(12, floor(length(offset * 2.0f) * _MipLevelFactor));
-                        
+                        mipLevel = 0;
+
                         // Mix step-dependent rotation with base jitter for per-step variation
                         // half stepRotation = rayCountRcp * TWO_PI * (jitter.y - 0.5) + stepIndexF * rayCountRcp * PI;
                         half stepRotation = rayCountRcp * TWO_PI * (jitter.y - 0.5h);
@@ -706,7 +707,7 @@ Shader "Hidden/PoorGI"
             HLSLPROGRAM
             #pragma vertex FulscreenTriangleVertex
             #pragma fragment Fragmet
-            
+
             #pragma multi_compile _ USE_SH01
 
             half _UpscaleFactor;
@@ -758,10 +759,10 @@ Shader "Hidden/PoorGI"
             void Sample4(Texture2D<half4> tex, float4 uv01, float4 uv23,
                 out half4 a, out half4 b, out half4 c, out half4 d)
             {
-                a = SAMPLE_TEXTURE2D_LOD(tex, sampler_LinearClamp, uv01.xy, 0);
-                b = SAMPLE_TEXTURE2D_LOD(tex, sampler_LinearClamp, uv01.zw, 0);
-                c = SAMPLE_TEXTURE2D_LOD(tex, sampler_LinearClamp, uv23.xy, 0);
-                d = SAMPLE_TEXTURE2D_LOD(tex, sampler_LinearClamp, uv23.zw, 0);
+                a = SAMPLE_TEXTURE2D_LOD(tex, sampler_PointClamp, uv01.xy, 0);
+                b = SAMPLE_TEXTURE2D_LOD(tex, sampler_PointClamp, uv01.zw, 0);
+                c = SAMPLE_TEXTURE2D_LOD(tex, sampler_PointClamp, uv23.xy, 0);
+                d = SAMPLE_TEXTURE2D_LOD(tex, sampler_PointClamp, uv23.zw, 0);
             }
 
             half4 Sample4_Bilinear(Texture2D<half4> tex, float4 uv01, float4 uv23, half4 weights)
@@ -821,7 +822,7 @@ Shader "Hidden/PoorGI"
                 // half4 ligting = (irradiance + reflection) * irradianceColor;
                 return LinearToSRGB(ligting);
             }
-            
+
             half4 SampleGI_SH01(half2 positionCS, half hiLinearDepth)
             {
                 half2 coord = positionCS / 4;
@@ -844,6 +845,7 @@ Shader "Hidden/PoorGI"
                 half4 weights = exp2(-20.0h * abs(hiLinearDepth - lowDepthABCD));
                 weights = saturate(weights / dot(1.0h, weights));
 
+                // Sample SH01
                 half4 shR = Sample4_Bilinear(_Irradiance, uv01, uv23, weights);
                 half4 shG = Sample4_Bilinear(_Irradiance2, uv01, uv23, weights);
                 half4 shB = Sample4_Bilinear(_SH, uv01, uv23, weights);
@@ -906,7 +908,7 @@ Shader "Hidden/PoorGI"
                 half4 totalWeight = 0.0h;
                 const half range = 3.0h;
                 const half samplesRcp = 1.0h / ((range * 2.0h + 1.0h) * (range * 2.0h + 1.0h));
-                
+
                 // Weighted gaussian filter for smoother color downsampling
                 for (half y = -range; y < range + 0.1h; y++)
                 {
@@ -915,12 +917,12 @@ Shader "Hidden/PoorGI"
                         half2 offset = half2(x, y);
                         half2 uv = input.uv + offset * _MainTex_TexelSize.xy * 8.0h;
                         half4 sample = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, uv, 0);
-                        
+
                         // Gaussian weight relative to center
                         half dist2 = dot(offset, offset);
                         half weight = exp(-dist2 * 0.03h);
                         weight = 1.0h;
-                        
+
                         half lum = Luminance(sample.rgb);
                         color += weight * smoothstep(0.3h, 0.4h, lum) * sample;
                         totalWeight += weight;
@@ -975,6 +977,8 @@ Shader "Hidden/PoorGI"
             half4 SampleLinear(float2 uv){ return SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, uv); }
             half4 Fragmet(Varyings input) : SV_Target
             {
+                // return SampleLinear(input.uv);
+
                 half4 color = 0.0h;
                 const float kernelSize = 4;
                 const half kernelSizeRcp = 1.0h / kernelSize;
@@ -982,6 +986,7 @@ Shader "Hidden/PoorGI"
 
                 for (float i = 0.0f; i < kernelSize; i++)
                 {
+                    // TODO: Use depth guided blur!
                     float2 offset = (i - halfKernel) * _Direction * _MainTex_TexelSize.xy;
                     color += SampleLinear(input.uv + offset);
                 }
