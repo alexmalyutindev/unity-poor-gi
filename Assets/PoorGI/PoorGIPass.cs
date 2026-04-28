@@ -37,6 +37,7 @@ namespace AlexMalyutin.PoorGI
             public TextureHandle VarianceDepth;
 
             public TextureHandle TempTraceBufferMips;
+            public TextureHandle TempTraceBufferMipsHalf;
 
             public TextureHandle ColorBuffer0;
             public TextureHandle ColorBuffer1;
@@ -112,11 +113,17 @@ namespace AlexMalyutin.PoorGI
             giBufferDesc.name = "_SHBuffer";
             passData.ColorBuffer2 = builder.CreateTransientTexture(giBufferDesc);
 
-            giBufferDesc.name = "_Temp_Mips";
+            giBufferDesc.name = "_Color_Mips";
             giBufferDesc.useMipMap = true;
             giBufferDesc.autoGenerateMips = false;
             giBufferDesc.filterMode = FilterMode.Bilinear;
             passData.TempTraceBufferMips = builder.CreateTransientTexture(giBufferDesc);
+
+            var giBufferHalfDesc = giBufferDesc;
+            giBufferHalfDesc.name = "_Color_Mips_Half";
+            giBufferHalfDesc.width /= 2;
+            giBufferHalfDesc.height /= 2;
+            passData.TempTraceBufferMipsHalf = builder.CreateTransientTexture(giBufferHalfDesc);
 
             passData.GBuffer0 = resourceData.gBuffer[0];
             builder.UseTexture(passData.GBuffer0);
@@ -137,9 +144,32 @@ namespace AlexMalyutin.PoorGI
 
                     // Downsample Color
                     cmd.Blit(data.CameraColorTarget, data.TempTraceBufferMips, data.Material, (int)Pass.BlitBlur);
-                    cmd.GenerateMips(data.TempTraceBufferMips);
+                    // cmd.GenerateMips(data.TempTraceBufferMips);
                     // TODO: Make blur frame color mip chain
-                    // cmd.DrawMesh();
+                    cmd.BeginSample("SceneColor.Blur");
+                    {
+                        var mipsCount = Mathf.FloorToInt(Mathf.Log(data.TraceHeight, 2.0f));
+                        for (int mipLevel = 0; mipLevel < mipsCount; mipLevel++)
+                        {
+                            cmd.SetGlobalVector("_InputTex_Texel", new Vector4(
+                                Mathf.Pow(2.0f, mipLevel + 1) / data.TraceWidth, 
+                                Mathf.Pow(2.0f, mipLevel + 1) / data.TraceHeight
+                            ));
+
+                            cmd.SetRenderTarget(data.TempTraceBufferMipsHalf, mipLevel);
+                            cmd.SetGlobalTexture("_InputTex", data.TempTraceBufferMips);
+                            cmd.SetGlobalInt("_InputTex_MipLevel", mipLevel);
+                            cmd.SetGlobalVector("_BlurDirection", new Vector4(1.0f, 0.0f));
+                            DrawFullScreenTriangle(cmd, data, 9);
+    
+                            cmd.SetRenderTarget(data.TempTraceBufferMips, mipLevel + 1);
+                            cmd.SetGlobalTexture("_InputTex", data.TempTraceBufferMipsHalf);
+                            cmd.SetGlobalInt("_InputTexMipLevel", mipLevel);
+                            cmd.SetGlobalVector("_BlurDirection", new Vector4(0.0f, 1.0f));
+                            DrawFullScreenTriangle(cmd, data, 9);
+                        }
+                    }
+                    cmd.EndSample("SceneColor.Blur");
                 }
                 cmd.EndSample("Prepare Fame Buffers");
 
@@ -328,11 +358,12 @@ namespace AlexMalyutin.PoorGI
             if (_triangleMesh) Object.DestroyImmediate(_triangleMesh);
         }
 
-        private static void DrawFullScreenTriangle(CommandBuffer cmd, PassData data, int pass)
-        {
+
+        private static void DrawFullScreenTriangle(CommandBuffer cmd, PassData data, Pass pass) => 
+            DrawFullScreenTriangle(cmd, data, (int)pass);
+        private static void DrawFullScreenTriangle(CommandBuffer cmd, PassData data, int pass) => 
             cmd.DrawMesh(_triangleMesh, Matrix4x4.identity, data.Material, 0, pass);
-        }
-        
+
         private static void BilateralBlur(CommandBuffer cmd, PassData data, TextureHandle src, TextureHandle tmp)
         {
             cmd.SetGlobalFloat("_RefrenceDepthLod", 0);

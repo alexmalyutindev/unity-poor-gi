@@ -12,13 +12,13 @@ Shader "Hidden/PoorGI"
         _EdgeSensitivity("Edge Sensitivity", Range(5, 50)) = 30
 
         [Space]
-        _RayLength("Ray Length", Range(0.1, 1.0)) = 0.5
+        _RayLength("Ray Length", Range(0.1, 2.0)) = 0.5
         _RaysCount("Rays Count", Range(2, 16)) = 4
         _StepsCount("Steps Count", Range(2, 16)) = 4
         _DepthThickness("Depth Thickness", Range(0.01, 5.0)) = 2.0
 
         [Space]
-        _MipLevelFactor("MipLevel Factor", Range(1, 32)) = 8.0
+        _MipLevelFactor("MipLevel Factor", Range(1, 64)) = 8.0
 
         [NonModifiableTextureData][HideInInspector]
         _STBN("_STBN", 2D) = "black" {}
@@ -183,7 +183,138 @@ Shader "Hidden/PoorGI"
                 return normalVS;
             }
             
+            // Reconstruct view-space position from integer pixel coord + linear eye depth.
+            // Uses the camera's projection parameters to avoid a full matrix multiply.
+            float3 ReconstructPositionVS(int2 pixelCoord, half linearDepth)
+            {
+                // Convert pixel center to NDC [-1, 1]
+                float2 uv  = (pixelCoord + 0.5) * _MainTex_TexelSize.xy; // zw = 1/width, 1/height
+                float2 ndc = uv * 2.0 - 1.0;
+            
+                half4 positionVS = mul(UNITY_MATRIX_I_P, half4(mad(uv, half2(-2.0h, 2.0h), half2(1.0h, -1.0h)), UNITY_RAW_FAR_CLIP_VALUE, 1.0h));
+                positionVS.xyz /= positionVS.w;
+                positionVS.xyz *= linearDepth / positionVS.z;
+                return positionVS.xyz;
+
+                // Unproject using projection matrix terms directly.
+                // unity_CameraProjection[0][0] = 2*near/(right-left) = 1/tan(fovX/2)
+                // unity_CameraProjection[1][1] = 2*near/(top-bottom) = 1/tan(fovY/2)
+                float2 viewRay = ndc / float2(unity_CameraProjection[0][0],
+                                              unity_CameraProjection[1][1]);
+                // In Unity view space camera looks down -Z
+                return float3(viewRay * linearDepth, -linearDepth);
+            }
+
+            half3 ReconstructNormals2(int2 baseCoord, half4x4 depth4x4)
+            {
+                // Pick the center sample of the 4x4 block and its cross neighbours.
+                // We use the four 2x2 quadrant centers to get stable, spread-out samples
+                // that match the footprint of the downsampled pixel.
+                //
+                //  Quadrant layout inside the 4x4 block (0-indexed):
+                //   TL=[0,2]  TR=[2,2]
+                //   BL=[0,0]  BR=[2,0]   (y=0 is bottom in view space)
+                //
+                // Cross pattern: center + right + left + up + down
+                // Each picked from the already-loaded depth4x4 to avoid extra texture fetches.
+
+                // Center: average of 2x2 inner block
+                half depthC = dot(
+                    half4(depth4x4[1][1], depth4x4[2][1], depth4x4[1][2], depth4x4[2][2]),
+                    0.25h
+                );
+                int2 coordC = baseCoord + int2(1, 1); // representative pixel for center
+
+                // Right neighbour: column 3, mid row
+                half depthR = 0.5h * (depth4x4[3][1] + depth4x4[3][2]);
+                int2 coordR = baseCoord + int2(3, 1);
+
+                // Left neighbour: column 0, mid row
+                half depthL = 0.5h * (depth4x4[0][1] + depth4x4[0][2]);
+                int2 coordL = baseCoord + int2(0, 1);
+
+                // Up neighbour: row 3, mid column
+                half depthU = 0.5h * (depth4x4[1][3] + depth4x4[2][3]);
+                int2 coordU = baseCoord + int2(1, 3);
+
+                // Down neighbour: row 0, mid column
+                half depthD = 0.5h * (depth4x4[1][0] + depth4x4[2][0]);
+                int2 coordD = baseCoord + int2(1, 0);
+
+                // Reconstruct 5 view-space positions
+                float3 PC = ReconstructPositionVS(coordC, depthC);
+                float3 PR = ReconstructPositionVS(coordR, depthR);
+                float3 PL = ReconstructPositionVS(coordL, depthL);
+                float3 PU = ReconstructPositionVS(coordU, depthU);
+                float3 PD = ReconstructPositionVS(coordD, depthD);
+
+                // Cross-pattern best-neighbour selection (Wicked Engine technique):
+                // pick the horizontal/vertical neighbour whose depth is closest to center,
+                // so we never form a triangle that straddles an object edge.
+                bool bestH = abs(PL.z - PC.z) < abs(PR.z - PC.z);
+                bool bestV = abs(PU.z - PC.z) < abs(PD.z - PC.z);
+
+                float3 Ph = bestH ? PL : PR;
+                float3 Pv = bestV ? PU : PD;
+
+                // Build CCW triangle → compute normal (matches article's winding convention)
+                // right+up  → cross(Pv-PC, Ph-PC)
+                // right+down→ cross(Ph-PC, Pv-PC)   [swapped to keep CCW]
+                // left+up   → cross(Pv-PC, Ph-PC)
+                // left+down → cross(Ph-PC, Pv-PC)
+                float3 normal;
+                if (bestV == false) // up is best vertical
+                    normal = normalize(cross(Pv - PC, Ph - PC));
+                else                // down is best vertical
+                    normal = normalize(cross(Ph - PC, Pv - PC));
+
+                // Unity view space: camera looks down -Z, so normals pointing toward
+                // camera have positive Z. Encode only XY; Z = sqrt(1 - x² - y²) at decode.
+                return half3(normal);
+            }
+
+            half3 ReconstructNormals3(int2 baseCoord, half4x4 depth4x4)
+            {
+                // Cross pattern from within the 4x4 block (0-indexed, x=col, y=row):
+                //
+                //        [1][3]  ← up
+                //   [0][1] [1][1] [2][1]
+                //        [1][0]  ← down
+                //
+                // center=[1][1], right=[2][1], left=[0][1], up=[1][2], down=[1][0]
+
+                half depthC = depth4x4[1][1];
+                half depthR = depth4x4[2][1];
+                half depthL = depth4x4[0][1];
+                half depthU = depth4x4[1][2];
+                half depthD = depth4x4[1][0];
+
+                // Full-res pixel coords for position reconstruction
+                float3 PC = ReconstructPositionVS(baseCoord + int2(1, 1), depthC);
+                float3 PR = ReconstructPositionVS(baseCoord + int2(2, 1), depthR);
+                float3 PL = ReconstructPositionVS(baseCoord + int2(0, 1), depthL);
+                float3 PU = ReconstructPositionVS(baseCoord + int2(1, 2), depthU);
+                float3 PD = ReconstructPositionVS(baseCoord + int2(1, 0), depthD);
+
+                // Best-neighbour selection
+                bool bestH = abs(depthL - depthC) < abs(depthR - depthC);
+                bool bestV = abs(depthU - depthC) < abs(depthD - depthC);
+
+                float3 Ph = bestH ? PL : PR;
+                float3 Pv = bestV ? PU : PD;
+
+                // CCW winding per article
+                float3 P1, P2;
+                if      (!bestH && !bestV) { P1 = PR; P2 = PU; }
+                else if (!bestH &&  bestV) { P1 = PD; P2 = PR; }
+                else if ( bestH && !bestV) { P1 = PU; P2 = PL; }
+                else                       { P1 = PL; P2 = PD; }
+
+                return half3(normalize(cross(P2 - PC, P1 - PC)));
+            }
+            
             // #define _2X2_BLUR_DEPTH
+            #define _4X4_BLUR_DEPTH
 
             half4 Fragmet(Varyings input) : SV_Target
             {
@@ -203,12 +334,13 @@ Shader "Hidden/PoorGI"
 
                     UNITY_UNROLL for (int i = 0; i < 4; i++) depth4x4[i] = LinearEyeDepth(depth4x4[i], _ZBufferParams);
 
-                    half3 normalVS = ReconstructNormals(baseCoord, depth4x4);
+                    half3 normalVS = ReconstructNormals3(baseCoord, depth4x4);
+                    // return half4(normalVS.xy, -normalVS.z, 1.0h);
 
                     half finalDepth = dot(0.25h * 0.25h, depth4x4[0] + depth4x4[1] + depth4x4[2] + depth4x4[3]);
-                    half4(finalDepth, normalVS.xy, 0.0h);
+                    return half4(finalDepth, normalVS.xy, 0.0h);
                 }
-                #elifdef _2X2_BLUR_DEPTH
+                #elif defined(_2X2_BLUR_DEPTH)
                 {
                     // NOTE: 2x2 depth downsampling.
                     float4 offset = float4(-_MainTex_TexelSize.xy, _MainTex_TexelSize.xy) * 0.5f;
@@ -219,7 +351,7 @@ Shader "Hidden/PoorGI"
                     depth2x2.w = SAMPLE_DEPTH_TEXTURE_LOD(_MainTex, sampler_LinearClamp, input.uv + offset.zw, 0);
                     return dot(LinearEyeDepth(depth2x2, _ZBufferParams), 0.25h);
                 }
-                #elifdef _4X4_MINMAX_DEPTH
+                #elif defined(_4X4_MINMAX_DEPTH)
                 {
                     half2 depth = half2(UNITY_RAW_FAR_CLIP_VALUE, UNITY_NEAR_CLIP_VALUE);
                     int2 coord = floor(input.positionCS.xy) * 4;
@@ -296,7 +428,7 @@ Shader "Hidden/PoorGI"
 
             inline half SampleLinearTraceDepth(half2 uv, uint lod = 0)
             {
-                return SAMPLE_DEPTH_TEXTURE_LOD(_TraceDepth, sampler_LinearClamp, uv, lod);
+                return SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, uv, lod).x;
             }
 
             half SampleVarianceDepth(half2 uv)
@@ -381,6 +513,8 @@ Shader "Hidden/PoorGI"
                 half2 jitter = 0.0h;
                 jitter.y = LOAD_TEXTURE2D(_BayerMatrix, tileCoord % 4).a;
                 jitter.x = LOAD_TEXTURE2D(_BayerMatrix, (tileCoord + 1) % 4).a;
+                // jitter = STBN(input.positionCS.xy);
+
                 // const float dispersion = 2.0f;
                 // const float rcp_dispersion2 = rcp(dispersion * dispersion);
                 // jitter.y = ((coords.x % dispersion) + dispersion * ((coords.y % dispersion)) + 0.5h) * rcp_dispersion2;
@@ -439,7 +573,7 @@ Shader "Hidden/PoorGI"
                         half noff = ji * ji;
 
                         half2 offset = rayDirection * noff;
-                        int mipLevel = min(4, floor(length(offset * 2.0f) * _MipLevelFactor));
+                        int mipLevel = min(12, floor(length(offset * 2.0f) * _MipLevelFactor));
                         
                         // Mix step-dependent rotation with base jitter for per-step variation
                         // half stepRotation = rayCountRcp * TWO_PI * (jitter.y - 0.5) + stepIndexF * rayCountRcp * PI;
@@ -454,8 +588,8 @@ Shader "Hidden/PoorGI"
                         // Use variance depth for more stable tracing, reduces firefly artifacts at edges
                         // half linearDepth = SampleVarianceDepth(rayUV);
 
-                        // half linearDepth = SampleLinearTraceDepth(rayUV, floor(length(offset) * 8.0h));
-                        half4 depthNormal = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, rayUV, 0);
+                        // half linearDepth = SampleLinearTraceDepth(rayUV, 0);
+                        half4 depthNormal = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, rayUV, mipLevel);
                         half linearDepth = depthNormal.x;
 
                         // TODO: Generate blured frame color buffer mip chain!
@@ -718,7 +852,7 @@ Shader "Hidden/PoorGI"
                 half3 reflection = EvaluateIrradianceSH01(shR, shG, shB, R);
                 const half smoothness = 0.2h;
                 half3 ligting = lerp(irradiance, reflection, smoothness);
-                // return half4(ligting * 4.0h, 1.0h);
+                // return half4(ligting, 1.0h);
                 return half4(LinearToSRGB(ligting), 1.0h);
             }
 
@@ -760,7 +894,7 @@ Shader "Hidden/PoorGI"
         }
         Pass
         {
-            Name "5 Blit 5x5"
+            Name "5 Blit 3x3"
 
             HLSLPROGRAM
             #pragma vertex FulscreenVertex
@@ -770,7 +904,7 @@ Shader "Hidden/PoorGI"
             {
                 half4 color = 0.0h;
                 half4 totalWeight = 0.0h;
-                const half range = 2.0h;
+                const half range = 3.0h;
                 const half samplesRcp = 1.0h / ((range * 2.0h + 1.0h) * (range * 2.0h + 1.0h));
                 
                 // Weighted gaussian filter for smoother color downsampling
@@ -779,24 +913,26 @@ Shader "Hidden/PoorGI"
                     for (half x = -range; x < range + 0.1h; x++)
                     {
                         half2 offset = half2(x, y);
-                        half2 uv = input.uv + offset * _MainTex_TexelSize.xy * 4.0h;
+                        half2 uv = input.uv + offset * _MainTex_TexelSize.xy * 8.0h;
                         half4 sample = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, uv, 0);
                         
                         // Gaussian weight relative to center
                         half dist2 = dot(offset, offset);
-                        half weight = exp(-dist2 * 0.5h);
+                        half weight = exp(-dist2 * 0.03h);
+                        weight = 1.0h;
                         
-                        color += sample * weight;
+                        half lum = Luminance(sample.rgb);
+                        color += weight * smoothstep(0.3h, 0.4h, lum) * sample;
                         totalWeight += weight;
                     }
                 }
 
                 color /= totalWeight;
-                // return color;
+                return color;
 
                 // NOTE: Luminance threshold.
-                half lum = Luminance(color);
-                return color * smoothstep(0.3h, 0.4h, lum);
+                // half lum = Luminance(color.rgb);
+                // return color * smoothstep(0.3h, 0.4h, lum);
             }
             ENDHLSL
         }
@@ -830,7 +966,7 @@ Shader "Hidden/PoorGI"
 
         Pass
         {
-            Name "7 BoxFilter 4x4"
+            Name "7 BoxFilter 4x4 TwoTaps"
             Cull Front
             HLSLPROGRAM
             #pragma vertex FulscreenVertex
@@ -856,7 +992,7 @@ Shader "Hidden/PoorGI"
 
         Pass
         {
-            Name "9 BlitLinear"
+            Name "8 BlitLinear"
             Cull Back
             HLSLPROGRAM
             #pragma vertex FulscreenTriangleVertex
@@ -866,6 +1002,35 @@ Shader "Hidden/PoorGI"
             half4 Fragmet(Varyings input) : SV_Target
             {
                 return SAMPLE_TEXTURE2D_LOD(_BlitTexture, sampler_LinearClamp, input.uv, 1);
+            }
+            ENDHLSL
+        }
+
+        Pass
+        {
+            Name "9 BoxFilter TwoTaps Mips"
+            Cull Off
+            HLSLPROGRAM
+            #pragma vertex FulscreenTriangleVertex
+            #pragma fragment Fragmet
+            TEXTURE2D(_InputTex);
+            int _InputTex_MipLevel;
+            float2 _InputTex_Texel;
+            float2 _BlurDirection;
+            half4 SampleLinear(float2 uv) { return SAMPLE_TEXTURE2D_LOD(_InputTex, sampler_LinearClamp, uv, _InputTex_MipLevel); }
+            half4 Fragmet(Varyings input) : SV_Target
+            {
+                half4 color = 0.0h;
+                const float kernelSize = 3;
+                const half kernelSizeRcp = 1.0h / kernelSize;
+                const float halfKernel = (kernelSize - 1.0) * 0.5;
+
+                for (float i = 0.0f; i < kernelSize; i++)
+                {
+                    float2 offset = (i - halfKernel) * _BlurDirection * _InputTex_Texel;
+                    color += SampleLinear(input.uv + offset);
+                }
+                return color * kernelSizeRcp;
             }
             ENDHLSL
         }
