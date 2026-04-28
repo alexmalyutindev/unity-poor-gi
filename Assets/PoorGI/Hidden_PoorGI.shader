@@ -71,6 +71,10 @@ Shader "Hidden/PoorGI"
         {
             return 1.0 / (zBufferParam.z * depth + zBufferParam.w);
         }
+        float4 LinearEyeDepth(float4 depth, float4 zBufferParam)
+        {
+            return 1.0 / (zBufferParam.z * depth + zBufferParam.w);
+        }
 
         // Funcs
         half3 TransformWorldToCameraNormal(half3 normalWS)
@@ -103,7 +107,8 @@ Shader "Hidden/PoorGI"
         half _BlurSize = 4.0h;
         half _EdgeSensitivity = 30.0h;
         half4 _MainTex_TexelSize;
-        Texture2D<half4> _MainTex;
+        // TODO: USE FLOAT PRECISION ON FOR DEPTH DOWNSAMPLING!!!
+        Texture2D<float4> _MainTex;
 
         struct Attributes
         {
@@ -151,169 +156,21 @@ Shader "Hidden/PoorGI"
             #pragma fragment Fragmet
 
             half Average(half4x4 value) { return dot(0.25h, value[0] + value[1] + value[2] + value[3]); }
-
-            half3 ReconstructNormals(uint2 baseCoord, half4x4 depth4x4)
+            
+            float3 ReconstructNormals(float2 uv, float3 offsets, int2 centerIndex, float4x4 depth4x4)
             {
-                float dZdx = 0.0;
-                float dZdy = 0.0;
+                float3 positionVS_T = TransformScreenUVToViewLinear(uv + offsets.zy, depth4x4[centerIndex.x][centerIndex.y + 1]);
+                float3 positionVS_B = TransformScreenUVToViewLinear(uv - offsets.zy, depth4x4[centerIndex.x][centerIndex.y - 1]);
+                float3 positionVS_R = TransformScreenUVToViewLinear(uv + offsets.xz, depth4x4[centerIndex.x + 1][centerIndex.y]);
+                float3 positionVS_L = TransformScreenUVToViewLinear(uv - offsets.xz, depth4x4[centerIndex.x - 1][centerIndex.y]);
 
-                UNITY_UNROLL for (int y = 0; y < 4; y++)
-                    UNITY_UNROLL for (int x = 0; x < 4; x++)
-                    {
-                        float wx = (float)x - 1.5;
-                        float wy = (float)y - 1.5;
-                        dZdx += depth4x4[x][y] * wx;
-                        dZdy += depth4x4[x][y] * wy;
-                    }
+                float3 dpdx = positionVS_L - positionVS_R;
+                float3 dpdy = positionVS_T - positionVS_B;
 
-                // Σ w² = 5 per column/row × 4 = 20
-                dZdx /= 20.0;
-                dZdy /= 20.0;
-
-                // Reconstruct the centre view-space position
-                float2 uvCenter = (float2(baseCoord) + 2.0) * _MainTex_TexelSize.xy; // +2 = centre of 4x4
-                float3 posC = TransformScreenUVToViewLinear(uvCenter, Average(depth4x4));
-
-                // Build tangent vectors: step one texel in X or Y, displace Z by the fitted gradient
-                float3 posR = TransformScreenUVToViewLinear(uvCenter + float2(_MainTex_TexelSize.x, 0), posC.z + dZdx);
-                float3 posU = TransformScreenUVToViewLinear(uvCenter + float2(0, _MainTex_TexelSize.y), posC.z + dZdy);
-
-                half3 normalVS = (half3)normalize(cross(posR - posC, posU - posC));
-                normalVS *= sign(-normalVS.z);
-                return normalVS;
-            }
-
-            // Reconstruct view-space position from integer pixel coord + linear eye depth.
-            // Uses the camera's projection parameters to avoid a full matrix multiply.
-            float3 ReconstructPositionVS(int2 pixelCoord, half linearDepth)
-            {
-                // Convert pixel center to NDC [-1, 1]
-                float2 uv  = (pixelCoord + 0.5) * _MainTex_TexelSize.xy; // zw = 1/width, 1/height
-                float2 ndc = uv * 2.0 - 1.0;
-
-                half4 positionVS = mul(UNITY_MATRIX_I_P, half4(mad(uv, half2(-2.0h, 2.0h), half2(1.0h, -1.0h)), UNITY_RAW_FAR_CLIP_VALUE, 1.0h));
-                positionVS.xyz /= positionVS.w;
-                positionVS.xyz *= linearDepth / positionVS.z;
-                return positionVS.xyz;
-
-                // Unproject using projection matrix terms directly.
-                // unity_CameraProjection[0][0] = 2*near/(right-left) = 1/tan(fovX/2)
-                // unity_CameraProjection[1][1] = 2*near/(top-bottom) = 1/tan(fovY/2)
-                float2 viewRay = ndc / float2(unity_CameraProjection[0][0],
-                                              unity_CameraProjection[1][1]);
-                // In Unity view space camera looks down -Z
-                return float3(viewRay * linearDepth, -linearDepth);
-            }
-
-            half3 ReconstructNormals2(int2 baseCoord, half4x4 depth4x4)
-            {
-                // Pick the center sample of the 4x4 block and its cross neighbours.
-                // We use the four 2x2 quadrant centers to get stable, spread-out samples
-                // that match the footprint of the downsampled pixel.
-                //
-                //  Quadrant layout inside the 4x4 block (0-indexed):
-                //   TL=[0,2]  TR=[2,2]
-                //   BL=[0,0]  BR=[2,0]   (y=0 is bottom in view space)
-                //
-                // Cross pattern: center + right + left + up + down
-                // Each picked from the already-loaded depth4x4 to avoid extra texture fetches.
-
-                // Center: average of 2x2 inner block
-                half depthC = dot(
-                    half4(depth4x4[1][1], depth4x4[2][1], depth4x4[1][2], depth4x4[2][2]),
-                    0.25h
-                );
-                int2 coordC = baseCoord + int2(1, 1); // representative pixel for center
-
-                // Right neighbour: column 3, mid row
-                half depthR = 0.5h * (depth4x4[3][1] + depth4x4[3][2]);
-                int2 coordR = baseCoord + int2(3, 1);
-
-                // Left neighbour: column 0, mid row
-                half depthL = 0.5h * (depth4x4[0][1] + depth4x4[0][2]);
-                int2 coordL = baseCoord + int2(0, 1);
-
-                // Up neighbour: row 3, mid column
-                half depthU = 0.5h * (depth4x4[1][3] + depth4x4[2][3]);
-                int2 coordU = baseCoord + int2(1, 3);
-
-                // Down neighbour: row 0, mid column
-                half depthD = 0.5h * (depth4x4[1][0] + depth4x4[2][0]);
-                int2 coordD = baseCoord + int2(1, 0);
-
-                // Reconstruct 5 view-space positions
-                float3 PC = ReconstructPositionVS(coordC, depthC);
-                float3 PR = ReconstructPositionVS(coordR, depthR);
-                float3 PL = ReconstructPositionVS(coordL, depthL);
-                float3 PU = ReconstructPositionVS(coordU, depthU);
-                float3 PD = ReconstructPositionVS(coordD, depthD);
-
-                // Cross-pattern best-neighbour selection (Wicked Engine technique):
-                // pick the horizontal/vertical neighbour whose depth is closest to center,
-                // so we never form a triangle that straddles an object edge.
-                bool bestH = abs(PL.z - PC.z) < abs(PR.z - PC.z);
-                bool bestV = abs(PU.z - PC.z) < abs(PD.z - PC.z);
-
-                float3 Ph = bestH ? PL : PR;
-                float3 Pv = bestV ? PU : PD;
-
-                // Build CCW triangle → compute normal (matches article's winding convention)
-                // right+up  → cross(Pv-PC, Ph-PC)
-                // right+down→ cross(Ph-PC, Pv-PC)   [swapped to keep CCW]
-                // left+up   → cross(Pv-PC, Ph-PC)
-                // left+down → cross(Ph-PC, Pv-PC)
-                float3 normal;
-                if (bestV == false) // up is best vertical
-                    normal = normalize(cross(Pv - PC, Ph - PC));
-                else                // down is best vertical
-                    normal = normalize(cross(Ph - PC, Pv - PC));
-
-                // Unity view space: camera looks down -Z, so normals pointing toward
-                // camera have positive Z. Encode only XY; Z = sqrt(1 - x² - y²) at decode.
-                return half3(normal);
-            }
-
-            half3 ReconstructNormals3(int2 baseCoord, half4x4 depth4x4)
-            {
-                // Cross pattern from within the 4x4 block (0-indexed, x=col, y=row):
-                //
-                //        [1][3]  ← up
-                //   [0][1] [1][1] [2][1]
-                //        [1][0]  ← down
-                //
-                // center=[1][1], right=[2][1], left=[0][1], up=[1][2], down=[1][0]
-
-                half depthC = depth4x4[1][1];
-                half depthR = depth4x4[2][1];
-                half depthL = depth4x4[0][1];
-                half depthU = depth4x4[1][2];
-                half depthD = depth4x4[1][0];
-
-                // Full-res pixel coords for position reconstruction
-                float3 PC = ReconstructPositionVS(baseCoord + int2(1, 1), depthC);
-                float3 PR = ReconstructPositionVS(baseCoord + int2(2, 1), depthR);
-                float3 PL = ReconstructPositionVS(baseCoord + int2(0, 1), depthL);
-                float3 PU = ReconstructPositionVS(baseCoord + int2(1, 2), depthU);
-                float3 PD = ReconstructPositionVS(baseCoord + int2(1, 0), depthD);
-
-                // Best-neighbour selection
-                bool bestH = abs(depthL - depthC) < abs(depthR - depthC);
-                bool bestV = abs(depthU - depthC) < abs(depthD - depthC);
-
-                float3 Ph = bestH ? PL : PR;
-                float3 Pv = bestV ? PU : PD;
-
-                // CCW winding per article
-                float3 P1, P2;
-                if      (!bestH && !bestV) { P1 = PR; P2 = PU; }
-                else if (!bestH &&  bestV) { P1 = PD; P2 = PR; }
-                else if ( bestH && !bestV) { P1 = PU; P2 = PL; }
-                else                       { P1 = PL; P2 = PD; }
-
-                return half3(normalize(cross(P2 - PC, P1 - PC)));
+                return cross(dpdx, dpdy);
             }
             
-            float3 ReconstructNormals4(int2 baseCoord, half4x4 depth4x4)
+            float3 ReconstructNormals(int2 baseCoord, float4x4 depth4x4)
             {
                 // TODO: Make more blurred normal recon!
                 float2 uv = (baseCoord + 1.5f) * _MainTex_TexelSize.xy;
@@ -322,19 +179,14 @@ Shader "Hidden/PoorGI"
                 // 02 12 22 32
                 // 01[11]21 31
                 // 00 10 20 30
-                float3 positionVS_T = TransformScreenUVToViewLinear(uv + offsets.zy, depth4x4[1][2]);
-                float3 positionVS_B = TransformScreenUVToViewLinear(uv - offsets.zy, depth4x4[1][0]);
-                float3 positionVS_R = TransformScreenUVToViewLinear(uv + offsets.xz, depth4x4[2][1]);
-                float3 positionVS_L = TransformScreenUVToViewLinear(uv - offsets.xz, depth4x4[0][1]);
+                float3 n = ReconstructNormals(uv, offsets, int2(1, 1), depth4x4);
+                return normalize(n);
 
-                // get the difference between the current and each offset position
-                half3 hDeriv = positionVS_L - positionVS_R;
-                half3 vDeriv = positionVS_T - positionVS_B;
+                n += ReconstructNormals(uv, offsets, int2(2, 1), depth4x4);
+                n += ReconstructNormals(uv, offsets, int2(1, 2), depth4x4);
+                n += ReconstructNormals(uv, offsets, int2(2, 2), depth4x4);
 
-                // get view space normal from the cross product of the diffs
-                half3 viewNormal = normalize(cross(hDeriv, vDeriv));
-
-                return normalize(viewNormal);
+                return normalize(n);
             }
 
             // #define _2X2_BLUR_DEPTH
@@ -344,10 +196,10 @@ Shader "Hidden/PoorGI"
             {
                 #ifdef _4X4_BLUR_DEPTH
                 {
-                    int2 baseCoord = (int2)floor(input.positionCS.xy) * 4;
+                    uint2 baseCoord = (uint2)floor(input.positionCS.xy) * 4;
 
                     // NOTE: 4x4 depth downsampling.
-                    half4x4 depth4x4;
+                    float4x4 depth4x4;
                     UNITY_UNROLL for (int y = 0; y < 4; y++)
                     {
                         UNITY_UNROLL for (int x = 0; x < 4; x++)
@@ -358,10 +210,8 @@ Shader "Hidden/PoorGI"
 
                     UNITY_UNROLL for (int i = 0; i < 4; i++) depth4x4[i] = LinearEyeDepth(depth4x4[i], _ZBufferParams);
 
-                    half3 normalVS = ReconstructNormals4(baseCoord, depth4x4);
-                    // return half4(normalVS.xy, -normalVS.z, 1.0h);
-
-                    half finalDepth = dot(0.25h * 0.25h, depth4x4[0] + depth4x4[1] + depth4x4[2] + depth4x4[3]);
+                    float3 normalVS = ReconstructNormals(baseCoord, depth4x4);
+                    float finalDepth = dot(0.25h * 0.25h, depth4x4[0] + depth4x4[1] + depth4x4[2] + depth4x4[3]);
                     return half4(finalDepth, normalVS.xy, normalVS.z);
                 }
                 #elif defined(_2X2_BLUR_DEPTH)
@@ -621,7 +471,6 @@ Shader "Hidden/PoorGI"
                         half linearDepth = depthNormal.x;
                         half3 normalVS = depthNormal.yzw; // TODO: Use normal for visibility!
 
-                        // TODO: Generate blured frame color buffer mip chain!
                         half3 lingting = SampleTraceLighting(rayUV, mipLevel);
                         half3 currentLighting;
 
@@ -653,10 +502,6 @@ Shader "Hidden/PoorGI"
                             occlusion |= indirect;
                         }
                         #endif
-
-                        // TODO: Use normals for better occlusion.
-                        // currentLighting *= max(0.0h, dot(rayDirectionVS_norm, probeNormalVS));
-                        // currentLighting *= max(0.0h, dot(-rayDirectionVS, normalVS));
 
                         #if !defined(USE_SH01)
                         // SH Ligting: https://deadvoxels.blogspot.com/2009/08/has-someone-tried-this-before.html
