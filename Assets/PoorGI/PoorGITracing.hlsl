@@ -7,6 +7,37 @@
 TEXTURE2D(_TraceColor);
 TEXTURE2D(_TraceDepth);
 
+//////////////////////////
+/// BITMASK VISIBILITY ///
+//////////////////////////
+
+static const uint sectorCount = 32u;
+static const half sectorCountRcp = 1.0h / half(sectorCount);
+
+// https://graphics.stanford.edu/%7Eseander/bithacks.html
+uint bitCount(uint value)
+{
+    value = value - ((value >> 1u) & 0x55555555u);
+    value = (value & 0x33333333u) + ((value >> 2u) & 0x33333333u);
+    return ((value + (value >> 4u) & 0xF0F0F0Fu) * 0x1010101u) >> 24u;
+}
+
+// https://cdrinmatane.github.io/posts/ssaovb-code/
+uint updateSectors(float minHorizon, float maxHorizon, uint outBitfield)
+{
+    uint startBit = uint(minHorizon * float(sectorCount));
+    uint horizonAngle = uint(ceil((maxHorizon - minHorizon) * float(sectorCount)));
+    uint angleBit = horizonAngle > 0u ? uint(0xFFFFFFFFu >> (sectorCount - horizonAngle)) : 0u;
+    uint currentBitfield = angleBit << startBit;
+    return outBitfield | currentBitfield;
+}
+
+half GetVisibility(uint indirect, uint occlusion)
+{
+    return half(bitCount(indirect & ~occlusion)) * sectorCountRcp;
+}
+
+
 half2 Rotate(half2 v, half a)
 {
     half s, c;
@@ -48,7 +79,8 @@ struct Output
     #endif
 };
 
-Output Trace(float2 positionCS, float2 uv, 
+Output Trace(
+    float2 positionCS, float2 uv, 
     float _RaysCount, 
     float _StepsCount, 
     float _DepthThickness, 
@@ -186,5 +218,120 @@ Output Trace(float2 positionCS, float2 uv,
     output.SHg = half4(shG, sh0.g);
     output.SHb = half4(shB, sh0.b);
     #endif
+    return output;
+}
+
+// Packed SH
+//  SHr: (SHr.rgb, SH0.r)
+//  SHg: (SHg.rgb, SH0.g)
+//  SHb: (SHb.rgb, SH0.b)
+struct TracingResult
+{
+    half4 SHr;
+    half4 SHg;
+    half4 SHb;
+};
+
+TracingResult TraceBitMaskGTAO(
+    float2 positionCS, float2 uv, 
+    float _RaysCount, 
+    float _StepsCount, 
+    float _DepthThickness, 
+    float _RayLength,
+    float _MipLevelFactor
+)
+{
+    const half rayCount = floor(_RaysCount);
+    const half raySteps = floor(_StepsCount);
+    const half thickness = _DepthThickness;
+
+    const half rayCountRcp = rcp(rayCount);
+
+    uint2 tileCoord = floor(positionCS);
+    half probeLinearDepth = LoadLinearTraceDepth(tileCoord);
+
+    half2 jitter = BayerNoise(tileCoord);
+
+    const half deltaAngle = TWO_PI * rayCountRcp;
+    const half2 rayNormalizationTerm = _ScreenSize.xx / _ScreenSize.xy;
+
+    half2 traceUV = uv;
+
+    half3 probeVS = TransformScreenUVToViewLinear(traceUV, probeLinearDepth - 0.01h);
+    half3 viewDirectionVS = -normalize(probeVS);
+
+    half3 sh0 = half3(0.0h, 0.0h, 0.0h);
+    half3 shR = half3(0.0h, 0.0h, 0.0h);
+    half3 shG = half3(0.0h, 0.0h, 0.0h);
+    half3 shB = half3(0.0h, 0.0h, 0.0h);
+
+    UNITY_LOOP
+    for (half alpha = 0.0h; alpha < TWO_PI - 0.01h; alpha += deltaAngle)
+    {
+        half2 rayDirection;
+        sincos(alpha, rayDirection.x, rayDirection.y);
+        rayDirection *= _RayLength * 0.5f;
+
+        int stepIndexI = 0;
+        uint occlusion = 0u;
+
+        UNITY_LOOP
+        for (half stepIndexF = 0.0h; stepIndexF < raySteps; stepIndexF++, stepIndexI++)
+        {
+            half ji = (jitter.x + max(0.01f, stepIndexF)) / (raySteps - 1.0h);
+            half noff = ji * ji;
+
+            half2 offset = rayDirection * noff;
+            int mipLevel = min(12, floor(length(offset * 2.0f) * _MipLevelFactor));
+
+            // Mix step-dependent rotation with base jitter for per-step variation
+            // half stepRotation = rayCountRcp * TWO_PI * (jitter.y - 0.5) + stepIndexF * rayCountRcp * PI;
+            half stepRotation = rayCountRcp * TWO_PI * (jitter.y - 0.5h);
+            offset = Rotate(offset, stepRotation);
+            offset *= rayNormalizationTerm; // Re-enable for aspect-ratio correction
+            half2 rayUV = traceUV + offset;
+
+            if (any(rayUV < 0.0h || rayUV > 1.0h)) break;
+
+            // TODO: Make depth pyramid for Pyramid HBAO: https://ceur-ws.org/Vol-3027/paper5.pdf
+            // TODO: Use variance depth for more stable tracing, reduces firefly artifacts at edges
+            // half linearDepth = SampleVarianceDepth(rayUV);
+
+            // half linearDepth = SampleLinearTraceDepth(rayUV, 0);
+            half4 depthNormal = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, rayUV, mipLevel);
+            half linearDepth = depthNormal.x;
+            half3 normalVS = depthNormal.yzw; // TODO: Use normal for visibility!
+
+            half3 currentLighting = SampleTraceLighting(rayUV, mipLevel);
+
+            half3 rayPositionVS_near = TransformScreenUVToViewLinear(rayUV, linearDepth);
+            half3 rayDirectionVS = rayPositionVS_near - probeVS;
+            half rayLength = length(rayDirectionVS);
+            half3 rayDirectionVS_norm = rayDirectionVS / rayLength;
+
+            half VdotR_near = dot(viewDirectionVS, rayDirectionVS_norm);
+            half VdotR_far = dot(viewDirectionVS, normalize(rayDirectionVS - viewDirectionVS * thickness));
+
+            half2 frontBackHorizon;
+            frontBackHorizon.x = VdotR_near;
+            frontBackHorizon.y = VdotR_far;
+            frontBackHorizon = GTAOFastAcos(frontBackHorizon) * INV_PI;
+
+            uint indirect = updateSectors(frontBackHorizon.x, frontBackHorizon.y, 0u);
+            currentLighting *= GetVisibility(indirect, occlusion);
+            occlusion |= indirect;
+
+            currentLighting *= rayCountRcp;
+            sh0 += currentLighting * kSHBasis0;
+            shR += currentLighting * rayDirectionVS_norm.x * kSHBasis1;
+            shG += currentLighting * rayDirectionVS_norm.y * kSHBasis1;
+            shB += currentLighting * rayDirectionVS_norm.z * kSHBasis1;
+        }
+    }
+
+    TracingResult output;
+    output.SHr = half4(shR, sh0.r);
+    output.SHg = half4(shG, sh0.g);
+    output.SHb = half4(shB, sh0.b);
     return output;
 }

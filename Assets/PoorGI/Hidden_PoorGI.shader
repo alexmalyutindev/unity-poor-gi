@@ -88,11 +88,11 @@ Shader "Hidden/PoorGI"
             return positionVS.xyz / positionVS.w;
         }
 
-        half3 TransformScreenUVToViewLinear(half2 uv, half linearDepth)
+        half3 TransformScreenUVToViewLinear(float2 uv, float linearDepth)
         {
-            half4 positionVS = mul(
+            float4 positionVS = mul(
                 UNITY_MATRIX_I_P,
-                half4(mad(uv, half2(-2.0h, 2.0h), half2(1.0h, -1.0h)), UNITY_RAW_FAR_CLIP_VALUE, 1.0h)
+                float4(mad(uv, float2(-2.0, 2.0), float2(1.0, -1.0)), UNITY_RAW_FAR_CLIP_VALUE, 1.0f)
             );
             positionVS.xyz /= positionVS.w;
             positionVS.xyz *= linearDepth / positionVS.z;
@@ -312,6 +312,30 @@ Shader "Hidden/PoorGI"
 
                 return half3(normalize(cross(P2 - PC, P1 - PC)));
             }
+            
+            float3 ReconstructNormals4(int2 baseCoord, half4x4 depth4x4)
+            {
+                // TODO: Make more blurred normal recon!
+                float2 uv = (baseCoord + 1.5f) * _MainTex_TexelSize.xy;
+                float3 offsets = float3(_MainTex_TexelSize.xy * 2.0f, 0.0f);
+                // 03 13 23 33
+                // 02 12 22 32
+                // 01[11]21 31
+                // 00 10 20 30
+                float3 positionVS_T = TransformScreenUVToViewLinear(uv + offsets.zy, depth4x4[1][2]);
+                float3 positionVS_B = TransformScreenUVToViewLinear(uv - offsets.zy, depth4x4[1][0]);
+                float3 positionVS_R = TransformScreenUVToViewLinear(uv + offsets.xz, depth4x4[2][1]);
+                float3 positionVS_L = TransformScreenUVToViewLinear(uv - offsets.xz, depth4x4[0][1]);
+
+                // get the difference between the current and each offset position
+                half3 hDeriv = positionVS_L - positionVS_R;
+                half3 vDeriv = positionVS_T - positionVS_B;
+
+                // get view space normal from the cross product of the diffs
+                half3 viewNormal = normalize(cross(hDeriv, vDeriv));
+
+                return normalize(viewNormal);
+            }
 
             // #define _2X2_BLUR_DEPTH
             #define _4X4_BLUR_DEPTH
@@ -334,11 +358,11 @@ Shader "Hidden/PoorGI"
 
                     UNITY_UNROLL for (int i = 0; i < 4; i++) depth4x4[i] = LinearEyeDepth(depth4x4[i], _ZBufferParams);
 
-                    half3 normalVS = ReconstructNormals3(baseCoord, depth4x4);
+                    half3 normalVS = ReconstructNormals4(baseCoord, depth4x4);
                     // return half4(normalVS.xy, -normalVS.z, 1.0h);
 
                     half finalDepth = dot(0.25h * 0.25h, depth4x4[0] + depth4x4[1] + depth4x4[2] + depth4x4[3]);
-                    return half4(finalDepth, normalVS.xy, 0.0h);
+                    return half4(finalDepth, normalVS.xy, normalVS.z);
                 }
                 #elif defined(_2X2_BLUR_DEPTH)
                 {
@@ -508,6 +532,9 @@ Shader "Hidden/PoorGI"
 
                 uint2 tileCoord = floor(input.positionCS);
                 half probeLinearDepth = LoadLinearTraceDepth(tileCoord);
+                half4 centerDepthNormals = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_PointClamp, input.uv, 0);
+                probeLinearDepth = centerDepthNormals.x;
+                half3 probeNormalVS = centerDepthNormals.yzw;
 
                 // NOTE: Hacky noise, STBN for step jitter, and regular pattern for angle jitter.
                 half2 jitter = 0.0h;
@@ -592,6 +619,7 @@ Shader "Hidden/PoorGI"
                         // half linearDepth = SampleLinearTraceDepth(rayUV, 0);
                         half4 depthNormal = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, rayUV, mipLevel);
                         half linearDepth = depthNormal.x;
+                        half3 normalVS = depthNormal.yzw; // TODO: Use normal for visibility!
 
                         // TODO: Generate blured frame color buffer mip chain!
                         half3 lingting = SampleTraceLighting(rayUV, mipLevel);
@@ -625,6 +653,10 @@ Shader "Hidden/PoorGI"
                             occlusion |= indirect;
                         }
                         #endif
+
+                        // TODO: Use normals for better occlusion.
+                        // currentLighting *= max(0.0h, dot(rayDirectionVS_norm, probeNormalVS));
+                        // currentLighting *= max(0.0h, dot(-rayDirectionVS, normalVS));
 
                         #if !defined(USE_SH01)
                         // SH Ligting: https://deadvoxels.blogspot.com/2009/08/has-someone-tried-this-before.html
