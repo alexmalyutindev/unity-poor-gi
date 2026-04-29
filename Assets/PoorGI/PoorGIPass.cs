@@ -109,7 +109,7 @@ namespace AlexMalyutin.PoorGI
             {
                 name = "_IrradianceBuffer",
                 filterMode = FilterMode.Bilinear,
-                format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.ARGBFloat, isSRGB: false),
+                format = GraphicsFormatUtility.GetGraphicsFormat(RenderTextureFormat.ARGBHalf, isSRGB: false),
                 clearBuffer = false,
             };
             passData.ColorBuffer0 = renderGraph.CreateTexture(giBufferDesc);
@@ -144,7 +144,31 @@ namespace AlexMalyutin.PoorGI
                 cmd.BeginSample("Prepare Fame Buffers");
                 {
                     cmd.Blit(data.CameraDepth, data.TraceDepth, data.Material, (int)Pass.DownSampleDepthPass);
-                    cmd.GenerateMips(data.TraceDepth);
+                    // cmd.GenerateMips(data.TraceDepth);
+                    cmd.BeginSample("TraceDepth.Blur");
+                    {
+                        var mipsCount = Mathf.CeilToInt(Mathf.Log(data.TraceHeight, 2.0f));
+                        for (int mipLevel = 0; mipLevel < mipsCount; mipLevel++)
+                        {
+                            cmd.SetGlobalVector("_InputTex_Texel", new Vector4(
+                                Mathf.Pow(2.0f, mipLevel + 1) / data.TraceWidth, 
+                                Mathf.Pow(2.0f, mipLevel + 1) / data.TraceHeight
+                            ));
+
+                            cmd.SetRenderTarget(data.TempTraceBufferMipsHalf, mipLevel);
+                            cmd.SetGlobalTexture("_InputTex", data.TraceDepth);
+                            cmd.SetGlobalInt("_InputTex_MipLevel", mipLevel);
+                            cmd.SetGlobalVector("_BlurDirection", new Vector4(1.0f, 0.0f));
+                            DrawFullScreenTriangle(cmd, data, 9);
+    
+                            cmd.SetRenderTarget(data.TraceDepth, mipLevel + 1);
+                            cmd.SetGlobalTexture("_InputTex", data.TempTraceBufferMipsHalf);
+                            cmd.SetGlobalInt("_InputTexMipLevel", mipLevel);
+                            cmd.SetGlobalVector("_BlurDirection", new Vector4(0.0f, 1.0f));
+                            DrawFullScreenTriangle(cmd, data, 9);
+                        }
+                    }
+                    cmd.EndSample("TraceDepth.Blur");
 
                     // Variance Depth
                     cmd.Blit(data.CameraDepth, data.TempTraceBufferMips, data.Material, (int)Pass.VarianceDepthPass);
@@ -156,7 +180,7 @@ namespace AlexMalyutin.PoorGI
                     // TODO: Make blur frame color mip chain
                     cmd.BeginSample("SceneColor.Blur");
                     {
-                        var mipsCount = Mathf.FloorToInt(Mathf.Log(data.TraceHeight, 2.0f));
+                        var mipsCount = Mathf.CeilToInt(Mathf.Log(data.TraceHeight, 2.0f));
                         for (int mipLevel = 0; mipLevel < mipsCount; mipLevel++)
                         {
                             cmd.SetGlobalVector("_InputTex_Texel", new Vector4(

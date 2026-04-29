@@ -71,10 +71,6 @@ Shader "Hidden/PoorGI"
         {
             return 1.0 / (zBufferParam.z * depth + zBufferParam.w);
         }
-        float4 LinearEyeDepth(float4 depth, float4 zBufferParam)
-        {
-            return 1.0 / (zBufferParam.z * depth + zBufferParam.w);
-        }
 
         // Funcs
         half3 TransformWorldToCameraNormal(half3 normalWS)
@@ -156,21 +152,21 @@ Shader "Hidden/PoorGI"
             #pragma fragment Fragmet
 
             half Average(half4x4 value) { return dot(0.25h, value[0] + value[1] + value[2] + value[3]); }
-            
-            float3 ReconstructNormals(float2 uv, float3 offsets, int2 centerIndex, float4x4 depth4x4)
+
+            half3 ReconstructNormals(float2 uv, float3 offsets, int2 centerIndex, half4x4 depth4x4)
             {
                 float3 positionVS_T = TransformScreenUVToViewLinear(uv + offsets.zy, depth4x4[centerIndex.x][centerIndex.y + 1]);
                 float3 positionVS_B = TransformScreenUVToViewLinear(uv - offsets.zy, depth4x4[centerIndex.x][centerIndex.y - 1]);
                 float3 positionVS_R = TransformScreenUVToViewLinear(uv + offsets.xz, depth4x4[centerIndex.x + 1][centerIndex.y]);
                 float3 positionVS_L = TransformScreenUVToViewLinear(uv - offsets.xz, depth4x4[centerIndex.x - 1][centerIndex.y]);
 
-                float3 dpdx = positionVS_L - positionVS_R;
-                float3 dpdy = positionVS_T - positionVS_B;
+                half3 dpdx = positionVS_L - positionVS_R;
+                half3 dpdy = positionVS_T - positionVS_B;
 
                 return cross(dpdx, dpdy);
             }
-            
-            float3 ReconstructNormals(int2 baseCoord, float4x4 depth4x4)
+
+            half3 ReconstructNormals(int2 baseCoord, half4x4 depth4x4)
             {
                 // TODO: Make more blurred normal recon!
                 float2 uv = (baseCoord + 1.5f) * _MainTex_TexelSize.xy;
@@ -179,7 +175,7 @@ Shader "Hidden/PoorGI"
                 // 02 12 22 32
                 // 01[11]21 31
                 // 00 10 20 30
-                float3 n = ReconstructNormals(uv, offsets, int2(1, 1), depth4x4);
+                half3 n = ReconstructNormals(uv, offsets, int2(1, 1), depth4x4);
                 return normalize(n);
 
                 n += ReconstructNormals(uv, offsets, int2(2, 1), depth4x4);
@@ -199,7 +195,7 @@ Shader "Hidden/PoorGI"
                     uint2 baseCoord = (uint2)floor(input.positionCS.xy) * 4;
 
                     // NOTE: 4x4 depth downsampling.
-                    float4x4 depth4x4;
+                    half4x4 depth4x4;
                     UNITY_UNROLL for (int y = 0; y < 4; y++)
                     {
                         UNITY_UNROLL for (int x = 0; x < 4; x++)
@@ -210,9 +206,9 @@ Shader "Hidden/PoorGI"
 
                     UNITY_UNROLL for (int i = 0; i < 4; i++) depth4x4[i] = LinearEyeDepth(depth4x4[i], _ZBufferParams);
 
-                    float3 normalVS = ReconstructNormals(baseCoord, depth4x4);
-                    float finalDepth = dot(0.25h * 0.25h, depth4x4[0] + depth4x4[1] + depth4x4[2] + depth4x4[3]);
-                    return half4(finalDepth, normalVS.xy, normalVS.z);
+                    half3 normalVS = ReconstructNormals(baseCoord, depth4x4);
+                    half finalDepth = dot(0.25h * 0.25h, depth4x4[0] + depth4x4[1] + depth4x4[2] + depth4x4[3]);
+                    return half4(finalDepth, normalVS);
                 }
                 #elif defined(_2X2_BLUR_DEPTH)
                 {
@@ -332,6 +328,11 @@ Shader "Hidden/PoorGI"
                 outVal *= sqrt(1.0 - abs(x));
                 return x >= 0 ? outVal : PI - outVal;
             }
+            
+            half3 UnpackNormalXY(half2 normalXY)
+            {
+                return half3(normalXY, max(1.0e-16, sqrt(1.0h - saturate(dot(normalXY, normalXY)))));
+            }
 
             //////////////////////////
             /// BITMASK VISIBILITY ///
@@ -384,12 +385,12 @@ Shader "Hidden/PoorGI"
                 half probeLinearDepth = LoadLinearTraceDepth(tileCoord);
                 half4 centerDepthNormals = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_PointClamp, input.uv, 0);
                 probeLinearDepth = centerDepthNormals.x;
-                half3 probeNormalVS = centerDepthNormals.yzw;
+                half3 probeNormalVS = UnpackNormalXY(centerDepthNormals.yz);
 
                 // NOTE: Hacky noise, STBN for step jitter, and regular pattern for angle jitter.
                 half2 jitter = 0.0h;
                 jitter.y = LOAD_TEXTURE2D(_BayerMatrix, tileCoord % 4).a;
-                jitter.x = LOAD_TEXTURE2D(_BayerMatrix, (tileCoord + 1) % 4).a;
+                jitter.x = LOAD_TEXTURE2D(_BayerMatrix, tileCoord % 4).a;
                 // jitter = STBN(input.positionCS.xy);
 
                 // const float dispersion = 2.0f;
@@ -446,12 +447,11 @@ Shader "Hidden/PoorGI"
                     UNITY_LOOP
                     for (half stepIndexF = 0.0h; stepIndexF < raySteps; stepIndexF++, stepIndexI++)
                     {
-                        half ji = (jitter.x + max(0.01f, stepIndexF)) / (raySteps - 1.0h);
+                        half ji = (jitter.x + max(0.1f, stepIndexF)) / (raySteps - 1.0h);
                         half noff = ji * ji;
 
                         half2 offset = rayDirection * noff;
-                        int mipLevel = min(12, floor(length(offset * 2.0f) * _MipLevelFactor));
-                        mipLevel = 0;
+                        int mipLevel = min(8, floor(length(offset * 2.0f) * _MipLevelFactor));
 
                         // Mix step-dependent rotation with base jitter for per-step variation
                         // half stepRotation = rayCountRcp * TWO_PI * (jitter.y - 0.5) + stepIndexF * rayCountRcp * PI;
@@ -469,7 +469,6 @@ Shader "Hidden/PoorGI"
                         // half linearDepth = SampleLinearTraceDepth(rayUV, 0);
                         half4 depthNormal = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_LinearClamp, rayUV, mipLevel);
                         half linearDepth = depthNormal.x;
-                        half3 normalVS = depthNormal.yzw; // TODO: Use normal for visibility!
 
                         half3 lingting = SampleTraceLighting(rayUV, mipLevel);
                         half3 currentLighting;
