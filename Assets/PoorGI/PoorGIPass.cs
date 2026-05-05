@@ -224,6 +224,8 @@ namespace AlexMalyutin.PoorGI
                 {
                     if (data.UseBoxFilter)
                     {
+                        cmd.SetGlobalTexture("_ReferenceDepth", data.TraceDepth);
+
                         cmd.BeginSample("BoxFilter.Irradiance");
                         BoxFilter(cmd, data, data.ColorBuffer0, data.TempTraceBufferMips);
                         cmd.EndSample("BoxFilter.Irradiance");

@@ -382,9 +382,9 @@ Shader "Hidden/PoorGI"
                 const half rayCountRcp = rcp(rayCount);
 
                 uint2 tileCoord = floor(input.positionCS);
-                half probeLinearDepth = LoadLinearTraceDepth(tileCoord);
+                // half probeLinearDepth = LoadLinearTraceDepth(tileCoord);
                 half4 centerDepthNormals = SAMPLE_TEXTURE2D_LOD(_TraceDepth, sampler_PointClamp, input.uv, 0);
-                probeLinearDepth = centerDepthNormals.x;
+                half probeLinearDepth = centerDepthNormals.x;
                 half3 probeNormalVS = UnpackNormalXY(centerDepthNormals.yz);
 
                 // NOTE: Hacky noise, STBN for step jitter, and regular pattern for angle jitter.
@@ -447,7 +447,7 @@ Shader "Hidden/PoorGI"
                     UNITY_LOOP
                     for (half stepIndexF = 0.0h; stepIndexF < raySteps; stepIndexF++, stepIndexI++)
                     {
-                        half ji = (jitter.x + max(0.1f, stepIndexF)) / (raySteps - 1.0h);
+                        half ji = (jitter.x + stepIndexF + 0.1h) / (raySteps - 1.0h);
                         half noff = ji * ji;
 
                         half2 offset = rayDirection * noff;
@@ -772,7 +772,7 @@ Shader "Hidden/PoorGI"
         }
         Pass
         {
-            Name "5 Blit 3x3"
+            Name "5 DownsampleColor Blur 3x3"
 
             HLSLPROGRAM
             #pragma vertex FulscreenVertex
@@ -781,8 +781,7 @@ Shader "Hidden/PoorGI"
             half4 Fragmet(Varyings input) : SV_Target
             {
                 half4 color = 0.0h;
-                half4 totalWeight = 0.0h;
-                const half range = 3.0h;
+                const half range = 1.0h;
                 const half samplesRcp = 1.0h / ((range * 2.0h + 1.0h) * (range * 2.0h + 1.0h));
 
                 // Weighted gaussian filter for smoother color downsampling
@@ -793,20 +792,12 @@ Shader "Hidden/PoorGI"
                         half2 offset = half2(x, y);
                         half2 uv = input.uv + offset * _MainTex_TexelSize.xy * 8.0h;
                         half4 sample = SAMPLE_TEXTURE2D_LOD(_MainTex, sampler_LinearClamp, uv, 0);
-
-                        // Gaussian weight relative to center
-                        half dist2 = dot(offset, offset);
-                        half weight = exp(-dist2 * 0.03h);
-                        weight = 1.0h;
-
-                        half lum = Luminance(sample.rgb);
-                        color += weight * smoothstep(0.3h, 0.4h, lum) * sample;
-                        totalWeight += weight;
+                        color += sample * samplesRcp;
                     }
                 }
 
-                color /= totalWeight;
-                return color;
+                half lum = Luminance(color.rgb);
+                return color * smoothstep(0.1h, 0.5h, lum);
 
                 // NOTE: Luminance threshold.
                 // half lum = Luminance(color.rgb);
@@ -850,23 +841,29 @@ Shader "Hidden/PoorGI"
             #pragma vertex FulscreenVertex
             #pragma fragment Fragmet
             float2 _Direction;
+            TEXTURE2D(_ReferenceDepth);
             half4 SampleLinear(float2 uv){ return SAMPLE_TEXTURE2D(_MainTex, sampler_LinearClamp, uv); }
             half4 Fragmet(Varyings input) : SV_Target
             {
-                // return SampleLinear(input.uv);
-
+                half totalWeight = 0.0h;
                 half4 color = 0.0h;
-                const float kernelSize = 4;
-                const half kernelSizeRcp = 1.0h / kernelSize;
-                const float halfKernel = (kernelSize - 1.0) * 0.5;
+                const int kernelSize = 4;
+                const half kernelSizeRcp = 1.0h / half(kernelSize);
+                const half halfKernel = (half(kernelSize) - 1.0h) * 0.5h;
 
-                for (float i = 0.0f; i < kernelSize; i++)
+                half centerDepth = SAMPLE_TEXTURE2D(_ReferenceDepth, sampler_LinearClamp, input.uv);
+                for (int i = 0; i < kernelSize; i++)
                 {
                     // TODO: Use depth guided blur!
                     float2 offset = (i - halfKernel) * _Direction * _MainTex_TexelSize.xy;
-                    color += SampleLinear(input.uv + offset);
+                    half4 sample = SampleLinear(input.uv + offset);
+                    half depth = SAMPLE_TEXTURE2D(_ReferenceDepth, sampler_LinearClamp, input.uv + offset);
+                    half weight = exp2(-20.0h * abs(centerDepth - depth));
+
+                    color += sample * weight;
+                    totalWeight += weight;
                 }
-                return color * kernelSizeRcp;
+                return color / max(0.001h, totalWeight);
             }
             ENDHLSL
         }
